@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Contacts
+GenericName=Address Book
+Comment=People on this computer, with optional iCloud
+Exec=omarchy-contacts
+Icon=x-office-address-book
+Terminal=false
+Categories=Office;ContactManagement;
+Keywords=contacts;address book;vcard;icloud;people;
+StartupWMClass=omarchy-contacts

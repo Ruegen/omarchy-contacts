@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${OMARCHY_CONTACTS_UI:-}"
+if [[ -z "${ROOT}" ]]; then
+  for dir in \
+    "${HOME}/apps/omarchy-contacts" \
+    "${HOME}/.config/omarchy/plugins/omarchy-contacts" \
+    /usr/share/omarchy-contacts
+  do
+    if [[ -f "${dir}/shell.qml" ]]; then
+      ROOT="${dir}"
+      break
+    fi
+  done
+fi
+
+if [[ -z "${ROOT}" || ! -f "${ROOT}/shell.qml" ]]; then
+  echo "omarchy-contacts: could not find the app files" >&2
+  exit 1
+fi
+
+if [[ ! -e "${ROOT}/Commons" && -d /usr/share/omarchy/shell/Commons ]]; then
+  ln -sfn /usr/share/omarchy/shell/Commons "${ROOT}/Commons"
+fi
+if [[ ! -e "${ROOT}/Ui" && -d /usr/share/omarchy/shell/Ui ]]; then
+  ln -sfn /usr/share/omarchy/shell/Ui "${ROOT}/Ui"
+fi
+
+DAEMON="${ROOT}/omarchy-contactsd"
+if [[ ! -x "${DAEMON}" ]]; then
+  DAEMON="${ROOT}/target/release/omarchy-contactsd"
+fi
+if [[ ! -x "${DAEMON}" ]]; then
+  echo "omarchy-contacts: build the helper first: make -C ${ROOT} daemon" >&2
+  exit 1
+fi
+
+exec qs -p "${ROOT}"

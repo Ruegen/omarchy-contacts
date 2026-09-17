@@ -179,16 +179,24 @@ impl Daemon {
         if apple_id.is_empty() || !apple_id.contains('@') {
             return json!({"ok": false, "error": "Apple ID looks wrong"});
         }
-        if let Err(e) = secrets::reject_regular_password(password) {
-            return json!({"ok": false, "error": e});
-        }
-        if let Err(e) = secrets::store_password(password) {
-            return json!({"ok": false, "error": e.to_string()});
+        if password.is_empty() {
+            if secrets::load_password().is_err() {
+                return json!({"ok": false, "error": "App-specific password is missing"});
+            }
+        } else {
+            if let Err(e) = secrets::reject_regular_password(password) {
+                return json!({"ok": false, "error": e});
+            }
+            if let Err(e) = secrets::store_password(password) {
+                return json!({"ok": false, "error": e.to_string()});
+            }
         }
         self.config.sync.apple_id = apple_id.to_string();
         self.config.sync.enabled = true;
         self.config.sync.provider = "icloud".into();
-        let _ = save_config(&self.store.layout, &self.config);
+        if let Err(e) = save_config(&self.store.layout, &self.config) {
+            return json!({"ok": false, "error": e.to_string()});
+        }
         json!({"ok": true, "apple_id": self.config.sync.apple_id})
     }
 
@@ -246,9 +254,11 @@ impl Daemon {
             error: String::new(),
         };
         let mut client = IcloudSync::connect(&apple_id, &password)?;
+        emit_progress(&self.progress);
         let mut log_buf = Vec::new();
         let result = client.run(&mut self.store, &mut log_buf, |p| {
-            self.progress = p;
+            self.progress = p.clone();
+            emit_progress(&p);
         });
         append_log(&self.store.layout, &log_buf);
         self.syncing = false;
@@ -399,7 +409,14 @@ fn peer_is_us(stream: &UnixStream) -> bool {
             &mut len,
         )
     };
-    rc == 0 && cred.uid == unsafe { libc::geteuid() }
+    rc == 0 && cred.uid == unsafe { libc::geteuid()     }
+}
+
+fn emit_progress(p: &SyncProgress) {
+    let line = json!({"ok": true, "progress": p});
+    let mut out = io::stdout();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
 }
 
 fn load_config(layout: &Layout) -> io::Result<Config> {

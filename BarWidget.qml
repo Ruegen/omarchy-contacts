@@ -8,7 +8,7 @@ BarWidget {
 
   readonly property var service: bar && bar.shell ? bar.shell.serviceFor("omarchy-contacts") : null
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
-  readonly property bool showCount: !settings || settings.showBarCount !== false
+  readonly property bool showCount: !!(settings && settings.showBarCount === true)
   readonly property int count: service ? Number(service.contactCount) || 0 : 0
 
   implicitWidth: button.implicitWidth

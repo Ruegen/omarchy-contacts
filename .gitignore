@@ -1,4 +1,6 @@
 /target
 /omarchy-contactsd
+/Commons
+/Ui
 *.swp
 .idea

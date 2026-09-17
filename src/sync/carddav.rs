@@ -1,20 +1,21 @@
-use std::io::{self, Read};
+use std::io;
 use std::time::Duration;
 
-use ureq::http::{Method, Request};
-use ureq::{Agent, Body, Error as UreqError};
+use reqwest::blocking::Client;
+use reqwest::header::HeaderValue;
+use reqwest::redirect::Policy;
+use reqwest::Method;
 
 use crate::contact::Contact;
 use crate::vcard::{parse_card, serialize_card, split_cards};
 
 pub const MAX_BODY: usize = 2 * 1024 * 1024;
 pub const MAX_PROPFIND: usize = 8 * 1024 * 1024;
-const MAX_REDIRECTS: u32 = 5;
 const PER_REQ_SECS: u64 = 60;
 
 #[derive(Clone, Debug)]
 pub struct CardDavClient {
-    agent: Agent,
+    client: Client,
     apple_id: String,
     password: String,
 }
@@ -28,25 +29,18 @@ pub struct RemoteCard {
 
 impl CardDavClient {
     pub fn new(apple_id: String, password: String) -> Self {
-        let agent = Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(PER_REQ_SECS)))
-            .max_redirects(MAX_REDIRECTS)
-            .http_status_as_error(false)
+        let client = Client::builder()
+            .timeout(Duration::from_secs(PER_REQ_SECS))
+            .connect_timeout(Duration::from_secs(20))
+            .redirect(Policy::none())
+            .https_only(true)
             .build()
-            .new_agent();
+            .expect("https client");
         Self {
-            agent,
+            client,
             apple_id,
             password,
         }
-    }
-
-    fn basic(&self) -> String {
-        let raw = format!("{}:{}", self.apple_id, self.password);
-        format!(
-            "Basic {}",
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw.as_bytes())
-        )
     }
 
     pub fn request(
@@ -62,9 +56,11 @@ impl CardDavClient {
             return Err(io::Error::other("refusing non-iCloud URL"));
         }
         let m = Method::from_bytes(method.as_bytes()).map_err(|_| io::Error::other("bad method"))?;
-        let mut b = Request::builder().method(m).uri(url);
-        b = b.header("Authorization", self.basic());
-        b = b.header("User-Agent", "omarchy-contacts/0.2");
+        let mut b = self
+            .client
+            .request(m.clone(), url)
+            .header("User-Agent", "omarchy-contacts/0.2")
+            .basic_auth(&self.apple_id, Some(&self.password));
         if let Some(d) = depth {
             b = b.header("Depth", d);
         }
@@ -72,39 +68,30 @@ impl CardDavClient {
             b = b.header("Content-Type", ct);
         }
         for (k, v) in extra {
-            b = b.header(*k, *v);
+            let val = HeaderValue::from_str(v).map_err(|e| io::Error::other(e.to_string()))?;
+            b = b.header(*k, val);
         }
-        let req = if let Some(body) = body {
-            b.body(body.to_string())
-                .map_err(|e| io::Error::other(e.to_string()))?
-        } else {
-            b.body(String::new())
-                .map_err(|e| io::Error::other(e.to_string()))?
-        };
-        match self.agent.run(req) {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let etag = resp
-                    .headers()
-                    .get("ETag")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                let loc = resp
-                    .headers()
-                    .get("Location")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                let body = read_body(resp.into_body(), MAX_BODY)?;
-                if (300..400).contains(&status) && !loc.is_empty() {
-                    return Ok((status, loc, body));
-                }
-                Ok((status, etag, body))
-            }
-            Err(UreqError::StatusCode(code)) => Err(io::Error::other(format!("http {code}"))),
-            Err(e) => Err(io::Error::other(e.to_string())),
+        if let Some(body) = body {
+            b = b.body(body.to_string());
         }
+        let resp = b.send().map_err(|e| io::Error::other(http_err(&e)))?;
+        let status = resp.status().as_u16();
+        let etag = header_text(resp.headers().get("etag"));
+        let loc = header_text(resp.headers().get("location"));
+        let bytes = resp.bytes().map_err(|e| io::Error::other(http_err(&e)))?;
+        let cap = if m.as_str() == "PROPFIND" { MAX_PROPFIND } else { MAX_BODY };
+        if bytes.len() > cap {
+            return Err(io::Error::other("response too large"));
+        }
+        if status == 401 || status == 403 {
+            return Err(io::Error::other(
+                "iCloud refused the sign-in. Check the Apple ID and app-specific password.",
+            ));
+        }
+        if (300..400).contains(&status) && !loc.is_empty() {
+            return Ok((status, loc, bytes.to_vec()));
+        }
+        Ok((status, etag, bytes.to_vec()))
     }
 
     pub fn propfind(&self, url: &str, depth: &str, xml: &str) -> io::Result<(u16, String, Vec<u8>)> {
@@ -177,21 +164,18 @@ impl CardDavClient {
     }
 }
 
-fn read_body(mut body: Body, max: usize) -> io::Result<Vec<u8>> {
-    let mut r = body.as_reader();
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 8192];
-    loop {
-        let n = r.read(&mut tmp)?;
-        if n == 0 {
-            break;
-        }
-        if buf.len().saturating_add(n) > max {
-            return Err(io::Error::other("response too large"));
-        }
-        buf.extend_from_slice(&tmp[..n]);
+fn header_text(v: Option<&HeaderValue>) -> String {
+    v.and_then(|h| h.to_str().ok()).unwrap_or("").to_string()
+}
+
+fn http_err(e: &reqwest::Error) -> String {
+    if e.is_timeout() {
+        "iCloud took too long to answer".into()
+    } else if e.is_connect() {
+        "Could not reach iCloud".into()
+    } else {
+        "Could not talk to iCloud".into()
     }
-    Ok(buf)
 }
 
 pub fn url_allowed(url: &str) -> bool {

@@ -6,32 +6,21 @@
 
 # Contacts for Omarchy
 
-A keyboard-first address book that lives in the Omarchy bar. Contacts are stored as vCard files on this machine. iCloud is optional.
+A keyboard-first address book. Open it from the app launcher, like the other Omarchy apps. Contacts are stored as vCard files on this machine. iCloud is optional.
 
-![Preview](preview.png)
-
-Drop a window snapshot at `preview.png` (see [screenshots/](screenshots/)).
+![Contacts](preview.png)
 
 ## Install
 
 ```bash
-omarchy plugin add <repo-url>
-cd ~/.config/omarchy/plugins/omarchy-contacts
-make daemon
-omarchy plugin enable omarchy-contacts
+cd ~/apps/omarchy-contacts
+make install
 ```
 
-Then add the widget to the bar if it is not already there, and bind Super+C:
-
-```lua
-o.bind("SUPER + C", "Contacts", "omarchy-shell shell toggle omarchy-contacts '{}'")
-```
-
-`make daemon` builds the helper next to the QML. The helper is not shipped as a binary; it is compiled on this machine.
+Then open **Contacts** from the app launcher. `make install` builds the helper and puts a launcher in `~/.local/bin`.
 
 ## Use
 
-- Click the address-book icon, or press Super+C.
 - `/` focuses search. Typing filters by name, phone, email, or organization.
 - `j` / `k` or the arrow keys move the list. Enter opens a contact. `n` adds one. `e` edits. `d` deletes.
 - `Ctrl+I` imports a `.vcf` file (macOS multi-card dumps work). `Ctrl+E` exports one.
@@ -59,13 +48,12 @@ The password is stored in the desktop keyring, not in a file.
 | Settings | `~/.config/omarchy-contacts/config.toml` |
 | Sync log | `~/.local/share/omarchy-contacts/sync.log` |
 
-One file per contact. Killing the helper is fine: the next search, click, or keystroke starts it again.
+One file per contact. Killing the helper is fine: the next time you open Contacts, it starts again.
 
 ## Keyboard (defaults, overridable in config.toml)
 
 | Key | Action |
 |-----|--------|
-| Super+C | Open |
 | / | Search |
 | Esc | Close search / overlay / window |
 | ↑ ↓ or j k | Move the list |

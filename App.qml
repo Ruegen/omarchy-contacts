@@ -6,8 +6,8 @@ import qs.Ui
 import "components"
 import "keys/Keymap.js" as Keymap
 
-// Contacts window. The shell loads this when the plugin is summoned and
-// calls open()/close(); the FloatingWindow follows.
+// Contacts window. A standalone Quickshell app: the launcher starts this
+// window, and closing it leaves the desktop.
 Item {
   id: root
 
@@ -37,13 +37,19 @@ Item {
   property bool searchFocused: false
   property bool helpOpen: false
   property bool editing: false
-  property bool setupOpen: false
+  property bool settingsOpen: false
+  property string selectedOption: ""
+  property string selectedAccount: ""
+  property int settingsColumn: 0
+  property int optionsCursor: 0
+  property int accountsCursor: 0
   property bool confirmDelete: false
+  property bool setupBusy: false
+  property string setupError: ""
   property var draft: ({})
   property int cursor: 0
   property string searchText: ""
-  property string appleIdDraft: ""
-  property string passwordDraft: ""
+  readonly property string passwordMask: "••••••••••••••••"
 
   readonly property var contacts: svc && svc.contacts ? svc.contacts : []
   readonly property var current: svc ? svc.current : null
@@ -52,11 +58,19 @@ Item {
     helpOpen: helpOpen,
     editing: editing,
     searchFocused: searchFocused,
-    setupOpen: setupOpen
+    setupOpen: settingsOpen
   })
   readonly property var sync: svc && svc.sync ? svc.sync : ({})
   readonly property bool syncing: !!(sync && (sync.syncing || (sync.progress && sync.progress.phase && sync.progress.phase !== "idle" && sync.progress.phase !== "")))
   readonly property string notice: svc ? String(svc.notice || svc.errorText || "") : ""
+  readonly property bool accountsColumnOpen: settingsOpen && selectedOption === "accounts"
+  readonly property bool icloudPaneOpen: settingsOpen && selectedAccount === "icloud"
+  readonly property var optionsItems: [
+    { id: "accounts", label: "Accounts", hint: "iCloud and other accounts" }
+  ]
+  readonly property var accountItems: [
+    { id: "icloud", label: "iCloud", hint: (sync && sync.apple_id) ? String(sync.apple_id) : "Not signed in" }
+  ]
 
   function open() {
     closingFromHost = false
@@ -71,10 +85,14 @@ Item {
     helpOpen = false
     searchFocused = false
     confirmDelete = false
+    settingsOpen = false
+    selectedOption = ""
+    selectedAccount = ""
   }
   function requestClose() {
-    if (shell && typeof shell.hide === "function") shell.hide("omarchy-contacts")
-    else close()
+    closingFromHost = true
+    opened = false
+    Qt.quit()
   }
 
   function selectedUid() {
@@ -95,10 +113,112 @@ Item {
 
   function startNew() {
     editing = true
-    setupOpen = false
+    closeSettings()
     helpOpen = false
     draft = { first: "", last: "", nickname: "", org: "", title: "", note: "", phones: [], emails: [] }
     Qt.callLater(function() { if (editor) editor.takeFocus() })
+  }
+
+  function openSettings() {
+    editing = false
+    helpOpen = false
+    settingsOpen = true
+    selectedOption = ""
+    selectedAccount = ""
+    settingsColumn = 0
+    optionsCursor = 0
+    accountsCursor = 0
+    setupError = ""
+    setupBusy = false
+  }
+
+  function closeSettings() {
+    settingsOpen = false
+    selectedOption = ""
+    selectedAccount = ""
+    settingsColumn = 0
+    optionsCursor = 0
+    accountsCursor = 0
+    setupError = ""
+    setupBusy = false
+  }
+
+  function settingsBack() {
+    if (selectedAccount.length > 0) {
+      selectedAccount = ""
+      settingsColumn = 1
+      setupError = ""
+      return
+    }
+    if (selectedOption.length > 0) {
+      selectedOption = ""
+      settingsColumn = 0
+      return
+    }
+    closeSettings()
+  }
+
+  function chooseOption(id, index) {
+    optionsCursor = index
+    selectedOption = id
+    selectedAccount = ""
+    settingsColumn = 1
+    accountsCursor = 0
+    setupError = ""
+  }
+
+  function settingsEnter() {
+    if (settingsColumn <= 0) {
+      var item = optionsItems[optionsCursor]
+      if (item) chooseOption(item.id, optionsCursor)
+      return
+    }
+    if (settingsColumn === 1) {
+      var acc = accountItems[accountsCursor]
+      if (acc && acc.id === "icloud") openIcloudPage()
+    }
+  }
+
+  function fillPasswordDots() {
+    if (!passwordField) return
+    passwordField.text = root.passwordMask
+  }
+
+  function passwordForSave() {
+    var typed = passwordField ? String(passwordField.text || "") : ""
+    if (typed === root.passwordMask) return ""
+    if (typed.length === 0 && root.sync && root.sync.has_password) return ""
+    return typed
+  }
+
+  function openIcloudPage() {
+    selectedAccount = "icloud"
+    settingsColumn = 2
+    setupError = ""
+    Qt.callLater(function() {
+      if (root.sync && root.sync.apple_id)
+        appleIdField.text = String(root.sync.apple_id)
+      if (root.sync && root.sync.has_password)
+        root.fillPasswordDots()
+      if (!appleIdField.text) appleIdField.forceActiveFocus()
+      else if (!passwordField.text || passwordField.text === root.passwordMask) {
+        if (!root.sync || !root.sync.has_password) passwordField.forceActiveFocus()
+      } else {
+        passwordField.forceActiveFocus()
+      }
+    })
+  }
+
+  function moveSettingsCursor(dy) {
+    if (settingsColumn <= 0) {
+      if (!optionsItems.length) return
+      optionsCursor = Math.max(0, Math.min(optionsItems.length - 1, optionsCursor + dy))
+      return
+    }
+    if (settingsColumn === 1) {
+      if (!accountItems.length) return
+      accountsCursor = Math.max(0, Math.min(accountItems.length - 1, accountsCursor + dy))
+    }
   }
 
   function startEdit() {
@@ -127,6 +247,31 @@ Item {
     svc.remove(uid, function() {
       confirmDelete = false
       if (cursor >= contacts.length) cursor = Math.max(0, contacts.length - 1)
+    })
+  }
+
+  function saveIcloud() {
+    if (!root.svc || root.setupBusy) return
+    root.setupError = ""
+    root.setupBusy = true
+    var appleId = appleIdField.text
+    var password = root.passwordForSave()
+    root.svc.configureIcloud(appleId, password, function(res) {
+      if (!res || !res.ok) {
+        root.setupBusy = false
+        root.setupError = root.svc.plain(res && res.error ? res.error : "Could not save those details")
+        return
+      }
+      root.fillPasswordDots()
+      root.setupError = "Looking for your contacts on iCloud…"
+      root.svc.syncNow(function(syncRes) {
+        root.setupBusy = false
+        if (syncRes && syncRes.ok) {
+          root.setupError = ""
+        } else {
+          root.setupError = root.svc.plain(syncRes && syncRes.error ? syncRes.error : "Sync did not finish")
+        }
+      })
     })
   }
 
@@ -174,7 +319,7 @@ Item {
       if (helpOpen) { helpOpen = false; event.accepted = true; return }
       if (confirmDelete) { confirmDelete = false; event.accepted = true; return }
       if (editing) { editing = false; event.accepted = true; return }
-      if (setupOpen) { setupOpen = false; event.accepted = true; return }
+      if (settingsOpen) { settingsBack(); event.accepted = true; return }
       if (searchFocused) {
         searchFocused = false
         searchText = ""
@@ -189,6 +334,22 @@ Item {
     if (keyContext === "help") { event.accepted = true; return }
     if (keyContext === "edit") {
       if (Keymap.matchChord(event, keys.save)) { saveDraft(); event.accepted = true }
+      return
+    }
+    if (settingsOpen && selectedAccount !== "icloud") {
+      if (Keymap.matchChord(event, keys.down) || Keymap.matchChord(event, keys.downAlt)) {
+        moveSettingsCursor(1); event.accepted = true; return
+      }
+      if (Keymap.matchChord(event, keys.up) || Keymap.matchChord(event, keys.upAlt)) {
+        moveSettingsCursor(-1); event.accepted = true; return
+      }
+      if (event.key === Qt.Key_Right || Keymap.matchChord(event, keys.open)) {
+        settingsEnter(); event.accepted = true; return
+      }
+      if (event.key === Qt.Key_Left) {
+        settingsBack(); event.accepted = true; return
+      }
+      event.accepted = true
       return
     }
     if (keyContext === "setup") return
@@ -290,6 +451,17 @@ Item {
             anchors.rightMargin: Style.space(16)
             spacing: Style.space(12)
 
+            Button {
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "☰"
+              tooltipText: "Options"
+              selected: root.settingsOpen
+              onClicked: {
+                if (root.settingsOpen) root.closeSettings()
+                else root.openSettings()
+              }
+            }
+
             Text {
               anchors.verticalCenter: parent.verticalCenter
               text: "Contacts"
@@ -343,12 +515,6 @@ Item {
             }
 
             Item { width: Style.space(16); height: 1 }
-
-            Button {
-              anchors.verticalCenter: parent.verticalCenter
-              text: "iCloud"
-              onClicked: root.setupOpen = !root.setupOpen
-            }
           }
         }
 
@@ -363,7 +529,7 @@ Item {
           height: parent.height - Style.space(52) - 1
 
           Rectangle {
-            width: Style.space(320)
+            width: Style.space(280)
             height: parent.height
             color: root.background
 
@@ -377,7 +543,7 @@ Item {
               dimColor: root.dim
               accent: root.accent
               background: root.background
-              visible: root.contacts.length > 0 && !(root.svc && root.svc.daemonMissing)
+              visible: !root.settingsOpen && root.contacts.length > 0 && !(root.svc && root.svc.daemonMissing)
               onActivated: function(uid) {
                 for (var i = 0; i < root.contacts.length; i++) {
                   if (String(root.contacts[i].uid) === uid) root.cursor = i
@@ -388,7 +554,7 @@ Item {
 
             EmptyState {
               anchors.fill: parent
-              visible: root.contacts.length === 0 && !(root.svc && root.svc.daemonMissing)
+              visible: !root.settingsOpen && root.contacts.length === 0 && !(root.svc && root.svc.daemonMissing)
               textColor: root.foreground
               dimColor: root.dim
               title: "No contacts yet"
@@ -397,11 +563,77 @@ Item {
 
             EmptyState {
               anchors.fill: parent
-              visible: !!(root.svc && root.svc.daemonMissing)
+              visible: !root.settingsOpen && !!(root.svc && root.svc.daemonMissing)
               textColor: root.foreground
               dimColor: root.dim
               title: "Helper is not built"
               body: "In the plugin folder run make daemon, then open Contacts again."
+            }
+
+            Column {
+              visible: root.settingsOpen
+              anchors.fill: parent
+              anchors.margins: Style.space(12)
+              spacing: Style.space(6)
+
+              Text {
+                text: "Options"
+                textFormat: Text.PlainText
+                color: root.foreground
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+
+              Repeater {
+                model: root.optionsItems
+                delegate: Rectangle {
+                  required property int index
+                  required property var modelData
+                  width: parent.width
+                  height: Style.space(52)
+                  radius: 6
+                  color: {
+                    if (modelData.id === root.selectedOption)
+                      return Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+                    if (root.settingsColumn === 0 && index === root.optionsCursor)
+                      return Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+                    return "transparent"
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: {
+                      root.settingsColumn = 0
+                      root.chooseOption(modelData.id, index)
+                    }
+                  }
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(12)
+                    anchors.right: chevron1.left
+                    anchors.rightMargin: Style.space(8)
+                    text: modelData.label
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideRight
+                  }
+                  Text {
+                    id: chevron1
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(12)
+                    text: "›"
+                    textFormat: Text.PlainText
+                    color: root.dim
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                  }
+                }
+              }
             }
           }
 
@@ -412,13 +644,107 @@ Item {
           }
 
           Rectangle {
-            width: parent.width - Style.space(321)
+            width: root.accountsColumnOpen ? Style.space(260) : 0
+            height: parent.height
+            visible: root.accountsColumnOpen
+            color: root.background
+            clip: true
+
+            Column {
+              anchors.fill: parent
+              anchors.margins: Style.space(12)
+              spacing: Style.space(6)
+
+              Text {
+                text: "Accounts"
+                textFormat: Text.PlainText
+                color: root.foreground
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+
+              Repeater {
+                model: root.accountItems
+                delegate: Rectangle {
+                  required property int index
+                  required property var modelData
+                  width: parent.width
+                  height: Style.space(52)
+                  radius: 6
+                  color: {
+                    if (modelData.id === root.selectedAccount)
+                      return Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.16)
+                    if (root.settingsColumn === 1 && index === root.accountsCursor)
+                      return Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+                    return "transparent"
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: {
+                      root.accountsCursor = index
+                      root.settingsColumn = 1
+                      if (modelData.id === "icloud") root.openIcloudPage()
+                    }
+                  }
+                  Column {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(12)
+                    anchors.right: chevron2.left
+                    anchors.rightMargin: Style.space(8)
+                    spacing: Style.space(2)
+                    Text {
+                      width: parent.width
+                      text: modelData.label
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                      elide: Text.ElideRight
+                    }
+                    Text {
+                      width: parent.width
+                      text: modelData.hint
+                      textFormat: Text.PlainText
+                      color: root.dim
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                      elide: Text.ElideRight
+                    }
+                  }
+                  Text {
+                    id: chevron2
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(12)
+                    text: "›"
+                    textFormat: Text.PlainText
+                    color: root.dim
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                  }
+                }
+              }
+            }
+          }
+
+          Rectangle {
+            width: root.accountsColumnOpen ? 1 : 0
+            height: parent.height
+            visible: root.accountsColumnOpen
+            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+          }
+
+          Rectangle {
+            width: parent.width - Style.space(281) - (root.accountsColumnOpen ? Style.space(261) : 0)
             height: parent.height
             color: root.background
 
             ContactDetail {
               anchors.fill: parent
-              visible: !root.editing && !root.setupOpen && !!root.current
+              visible: !root.editing && !root.settingsOpen && !!root.current
               contact: root.current
               textColor: root.foreground
               dimColor: root.dim
@@ -430,7 +756,7 @@ Item {
 
             EmptyState {
               anchors.fill: parent
-              visible: !root.editing && !root.setupOpen && !root.current
+              visible: !root.editing && !root.settingsOpen && !root.current
               textColor: root.foreground
               dimColor: root.dim
               title: "Select a contact"
@@ -448,8 +774,26 @@ Item {
               onCancelRequested: root.editing = false
             }
 
+            EmptyState {
+              anchors.fill: parent
+              visible: root.settingsOpen && !root.editing && root.selectedOption.length === 0
+              textColor: root.foreground
+              dimColor: root.dim
+              title: "Choose an option"
+              body: "Open Accounts to connect iCloud."
+            }
+
+            EmptyState {
+              anchors.fill: parent
+              visible: root.settingsOpen && !root.editing && root.accountsColumnOpen && !root.icloudPaneOpen
+              textColor: root.foreground
+              dimColor: root.dim
+              title: "Choose an account"
+              body: "iCloud keeps your contacts in sync."
+            }
+
             Column {
-              visible: root.setupOpen && !root.editing
+              visible: root.icloudPaneOpen && !root.editing
               anchors.fill: parent
               anchors.margins: Style.space(24)
               spacing: Style.space(10)
@@ -465,7 +809,7 @@ Item {
               Text {
                 width: parent.width
                 wrapMode: Text.Wrap
-                text: "Use an app-specific password from appleid.apple.com → Sign-In & Security → App-Specific Passwords. Your regular Apple ID password is rejected."
+                text: "Paste the app-specific password from appleid.apple.com. The four groups with dashes are fine."
                 textFormat: Text.PlainText
                 color: root.dim
                 font.family: Style.font.family
@@ -475,34 +819,47 @@ Item {
               TextField {
                 id: appleIdField
                 width: Math.min(parent.width, Style.space(360))
-                text: root.sync && root.sync.apple_id ? String(root.sync.apple_id) : ""
+                enabled: !root.setupBusy
+                onAccepted: passwordField.forceActiveFocus()
               }
               Text { text: "App-specific password"; textFormat: Text.PlainText; color: root.dim; font.family: Style.font.family; font.pixelSize: Style.font.body }
               TextField {
                 id: passwordField
                 width: appleIdField.width
                 password: true
+                enabled: !root.setupBusy
+                onAccepted: root.saveIcloud()
+              }
+              Text {
+                width: parent.width
+                visible: root.setupError.length > 0
+                wrapMode: Text.Wrap
+                text: root.setupError
+                textFormat: Text.PlainText
+                color: Color.urgent
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
               }
               Row {
                 spacing: Style.space(8)
                 Button {
-                  text: "Save and sync"
-                  onClicked: {
-                    if (!root.svc) return
-                    root.svc.configureIcloud(appleIdField.text, passwordField.text, function(res) {
-                      passwordField.text = ""
-                      if (res && res.ok) {
-                        root.setupOpen = false
-                        root.svc.syncNow(function() {})
-                      }
-                    })
-                  }
+                  text: root.setupBusy ? "Working…" : "Save and sync"
+                  enabled: !root.setupBusy
+                  onClicked: root.saveIcloud()
                 }
                 Button {
-                  text: "Cancel"
+                  text: "Sync now"
+                  visible: !!(root.sync && (root.sync.has_password || root.sync.apple_id))
+                  enabled: !root.setupBusy
                   onClicked: {
-                    passwordField.text = ""
-                    root.setupOpen = false
+                    if (!root.svc) return
+                    root.setupError = "Looking for your contacts on iCloud…"
+                    root.setupBusy = true
+                    root.svc.syncNow(function(syncRes) {
+                      root.setupBusy = false
+                      if (syncRes && syncRes.ok) root.setupError = ""
+                      else root.setupError = root.svc.plain(syncRes && syncRes.error ? syncRes.error : "Sync did not finish")
+                    })
                   }
                 }
               }

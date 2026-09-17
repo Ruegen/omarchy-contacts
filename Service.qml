@@ -26,7 +26,7 @@ Item {
 
   property var settings: ({
     syncIntervalSec: 300,
-    showBarCount: true,
+    showBarCount: false,
     watchImport: true
   })
 
@@ -129,7 +129,6 @@ Item {
       root.sync = s
     }
     if (obj.ok === false && obj.error) root.errorText = plain(obj.error)
-    else if (obj.ok === true) root.errorText = ""
     var id = obj.id
     if (id !== undefined && root.pending[id]) {
       var cb = root.pending[id]
@@ -196,6 +195,7 @@ Item {
 
   function syncNow(cb) {
     send("sync_now", {}, function(res) {
+      if (res && res.ok) root.errorText = ""
       root.list(root.query)
       if (cb) cb(res)
     })
@@ -203,7 +203,10 @@ Item {
 
   function configureIcloud(appleId, password, cb) {
     send("set_icloud", { apple_id: String(appleId || ""), password: String(password || "") }, function(res) {
-      send("status", {}, function() {})
+      if (res && res.ok) {
+        root.errorText = ""
+        send("status", {}, function() {})
+      }
       if (cb) cb(res)
     })
   }
@@ -221,7 +224,7 @@ Item {
     stdinEnabled: true
     stdout: SplitParser {
       splitMarker: "\n"
-      onRead: root.handleLine(data)
+      onRead: function(data) { root.handleLine(data) }
     }
     stderr: SplitParser {
       splitMarker: "\n"

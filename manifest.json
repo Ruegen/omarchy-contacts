@@ -33,7 +33,7 @@
     "defaultSection": "right",
     "defaults": {
       "syncIntervalSec": 300,
-      "showBarCount": true,
+      "showBarCount": false,
       "watchImport": true
     },
     "schema": [
@@ -41,8 +41,8 @@
         "key": "showBarCount",
         "type": "boolean",
         "label": "Show the contact count in the bar",
-        "defaultValue": true,
-        "description": "Turn this off to keep only the address-book icon. The window still opens from the icon or Super+C."
+        "defaultValue": false,
+        "description": "Turn this on to show how many contacts you have next to the icon."
       },
       {
         "key": "syncIntervalSec",
