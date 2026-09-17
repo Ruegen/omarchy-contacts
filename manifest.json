@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "id": "omarchy-contacts",
+  "name": "Contacts",
+  "version": "0.2.0",
+  "author": "Ruegen",
+  "license": "MIT",
+  "description": "Local address book for Omarchy. Search and edit contacts from the bar, import a vCard dump from a Mac, and optionally keep them in step with iCloud.",
+  "kinds": [
+    "service",
+    "bar-widget",
+    "panel"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "App.qml"
+  },
+  "barWidget": {
+    "displayName": "Contacts",
+    "description": "Address book in the bar. Click to open the list. Super+C does the same from the keyboard.",
+    "category": "Communication",
+    "aliases": [
+      "contacts",
+      "address book",
+      "vcard",
+      "icloud",
+      "carddav",
+      "people"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "syncIntervalSec": 300,
+      "showBarCount": true,
+      "watchImport": true
+    },
+    "schema": [
+      {
+        "key": "showBarCount",
+        "type": "boolean",
+        "label": "Show the contact count in the bar",
+        "defaultValue": true,
+        "description": "Turn this off to keep only the address-book icon. The window still opens from the icon or Super+C."
+      },
+      {
+        "key": "syncIntervalSec",
+        "type": "integer",
+        "label": "iCloud sync every (seconds)",
+        "min": 120,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 300,
+        "description": "How often to talk to iCloud while Contacts is running. Two minutes is the floor so Apple's servers are not hammered."
+      },
+      {
+        "key": "watchImport",
+        "type": "boolean",
+        "label": "Auto-import dropped vCard files",
+        "defaultValue": true,
+        "description": "When on, a .vcf dropped into the import folder is added to the address book without opening the window."
+      }
+    ]
+  }
+}
