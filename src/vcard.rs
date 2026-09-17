@@ -65,7 +65,7 @@ pub fn parse_card(text: &str) -> Result<Contact, ParseError> {
             "NOTE" => c.note = decode_note(&params, &value),
             "REV" => c.rev = unescape(&value),
             "TEL" => {
-                let v = unescape(&value);
+                let v = normalize_tel(&unescape(&value));
                 if !v.is_empty() {
                     c.phones.push(Phone {
                         type_: tel_type(&params),
@@ -206,11 +206,21 @@ fn unescape(v: &str) -> String {
                 Some(other) => out.push(other),
                 None => {}
             }
-        } else {
+        } else if c != '\r' {
             out.push(c);
         }
     }
     out.trim().to_string()
+}
+
+fn normalize_tel(v: &str) -> String {
+    let v = v.trim();
+    let v = v
+        .strip_prefix("tel:")
+        .or_else(|| v.strip_prefix("TEL:"))
+        .unwrap_or(v)
+        .trim();
+    v.trim_end_matches(['\\', ';']).trim().to_string()
 }
 
 fn escape(v: &str) -> String {
@@ -327,7 +337,14 @@ fn parse_photo(params: &str, value: &str) -> Option<Vec<u8>> {
         rest
     } else if let Some(rest) = v.strip_prefix("data:image/jpg;base64,") {
         rest
-    } else if p.contains("ENCODING=B") || p.contains("ENCODING=BASE64") || p.contains("ENCODING=b") {
+    } else if p.contains("ENCODING=B")
+        || p.contains("ENCODING=BASE64")
+        || p.contains("TYPE=JPEG")
+        || p.contains("TYPE=JPG")
+    {
+        if v.starts_with("http://") || v.starts_with("https://") {
+            return None;
+        }
         v
     } else if v.starts_with("/9j/") {
         v
@@ -385,6 +402,19 @@ mod tests {
         let back = parse_card(&text).unwrap();
         assert_eq!(back.photo_jpeg.as_ref().unwrap().len(), jpeg.len());
         assert_eq!(back.first, "Ada");
+    }
+
+    #[test]
+    fn icloud_xml_entities_and_tel_uri() {
+        let src = "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Amp;Tom;;;\r\nFN:Tom & Jerry\r\nTEL;TYPE=CELL:tel:+61411112222\r\nUID:amp1\r\nEND:VCARD\r\n";
+        let c = parse_card(src).unwrap();
+        assert_eq!(c.fn_, "Tom & Jerry");
+        assert_eq!(c.phones[0].value, "+61411112222");
+        let leftover = parse_card(
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ada\r\nTEL;TYPE=CELL:+61411112222\\;\r\nUID:amp2\r\nEND:VCARD\r\n",
+        )
+        .unwrap();
+        assert_eq!(leftover.phones[0].value, "+61411112222");
     }
 
     #[test]

@@ -10,8 +10,19 @@ use crate::contact::Contact;
 use crate::vcard::{parse_card, serialize_card, split_cards};
 
 pub const MAX_BODY: usize = 2 * 1024 * 1024;
-pub const MAX_PROPFIND: usize = 8 * 1024 * 1024;
+pub const MAX_PROPFIND: usize = 32 * 1024 * 1024;
+const MAX_REDIRECTS: u32 = 8;
 const PER_REQ_SECS: u64 = 60;
+
+#[derive(Clone, Debug)]
+pub struct DavResponse {
+    pub status: u16,
+    pub etag: String,
+    pub body: Vec<u8>,
+    pub url: String,
+    pub partition: String,
+    pub instance: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct CardDavClient {
@@ -52,61 +63,110 @@ impl CardDavClient {
         body: Option<&str>,
         extra: &[(&str, &str)],
     ) -> io::Result<(u16, String, Vec<u8>)> {
-        if !url_allowed(url) {
-            return Err(io::Error::other("refusing non-iCloud URL"));
-        }
-        let m = Method::from_bytes(method.as_bytes()).map_err(|_| io::Error::other("bad method"))?;
-        let mut b = self
-            .client
-            .request(m.clone(), url)
-            .header("User-Agent", "omarchy-contacts/0.2")
-            .basic_auth(&self.apple_id, Some(&self.password));
-        if let Some(d) = depth {
-            b = b.header("Depth", d);
-        }
-        if let Some(ct) = content_type {
-            b = b.header("Content-Type", ct);
-        }
-        for (k, v) in extra {
-            let val = HeaderValue::from_str(v).map_err(|e| io::Error::other(e.to_string()))?;
-            b = b.header(*k, val);
-        }
-        if let Some(body) = body {
-            b = b.body(body.to_string());
-        }
-        let resp = b.send().map_err(|e| io::Error::other(http_err(&e)))?;
-        let status = resp.status().as_u16();
-        let etag = header_text(resp.headers().get("etag"));
-        let loc = header_text(resp.headers().get("location"));
-        let bytes = resp.bytes().map_err(|e| io::Error::other(http_err(&e)))?;
-        let cap = if m.as_str() == "PROPFIND" { MAX_PROPFIND } else { MAX_BODY };
-        if bytes.len() > cap {
-            return Err(io::Error::other("response too large"));
-        }
-        if status == 401 || status == 403 {
+        let r = self.send(method, url, depth, content_type, body, extra)?;
+        if r.status == 401 || r.status == 403 {
             return Err(io::Error::other(
                 "iCloud refused the sign-in. Check the Apple ID and app-specific password.",
             ));
         }
-        if (300..400).contains(&status) && !loc.is_empty() {
-            return Ok((status, loc, bytes.to_vec()));
-        }
-        Ok((status, etag, bytes.to_vec()))
+        Ok((r.status, r.etag, r.body))
     }
 
-    pub fn propfind(&self, url: &str, depth: &str, xml: &str) -> io::Result<(u16, String, Vec<u8>)> {
-        let mut res = self.request(
+    pub fn propfind_at(&self, url: &str, depth: &str, xml: &str) -> io::Result<DavResponse> {
+        self.send(
             "PROPFIND",
             url,
             Some(depth),
             Some("application/xml; charset=utf-8"),
             Some(xml),
             &[],
-        )?;
-        if res.2.len() > MAX_PROPFIND {
-            res.2.truncate(MAX_PROPFIND);
+        )
+    }
+
+    pub fn report_at(&self, url: &str, xml: &str) -> io::Result<DavResponse> {
+        self.send(
+            "REPORT",
+            url,
+            Some("1"),
+            Some("application/xml; charset=utf-8"),
+            Some(xml),
+            &[],
+        )
+    }
+
+    fn send(
+        &self,
+        method: &str,
+        url: &str,
+        depth: Option<&str>,
+        content_type: Option<&str>,
+        body: Option<&str>,
+        extra: &[(&str, &str)],
+    ) -> io::Result<DavResponse> {
+        let m = Method::from_bytes(method.as_bytes()).map_err(|_| io::Error::other("bad method"))?;
+        let mut current = url.trim().to_string();
+        for _ in 0..MAX_REDIRECTS {
+            if !url_allowed(&current) {
+                return Err(io::Error::other("refusing non-iCloud URL"));
+            }
+            let mut b = self
+                .client
+                .request(m.clone(), &current)
+                .header("User-Agent", "omarchy-contacts/0.2")
+                .basic_auth(&self.apple_id, Some(&self.password));
+            if let Some(d) = depth {
+                b = b.header("Depth", d);
+            }
+            if let Some(ct) = content_type {
+                b = b.header("Content-Type", ct);
+            }
+            for (k, v) in extra {
+                let val = HeaderValue::from_str(v).map_err(|e| io::Error::other(e.to_string()))?;
+                b = b.header(*k, val);
+            }
+            if let Some(body) = body {
+                b = b.body(body.to_string());
+            }
+            let resp = b.send().map_err(|e| io::Error::other(http_err(&e)))?;
+            let status = resp.status().as_u16();
+            let etag = header_text(resp.headers().get("etag"));
+            let loc = header_text(resp.headers().get("location"));
+            let partition = header_text(resp.headers().get("x-apple-user-partition"));
+            let instance = header_text(resp.headers().get("x-responding-instance"));
+            let bytes = resp.bytes().map_err(|e| io::Error::other(http_err(&e)))?;
+            let cap = if m.as_str() == "PROPFIND" || m.as_str() == "REPORT" {
+                MAX_PROPFIND
+            } else {
+                MAX_BODY
+            };
+            if bytes.len() > cap {
+                return Err(io::Error::other("response too large"));
+            }
+            if (300..400).contains(&status) {
+                if loc.is_empty() {
+                    return Err(io::Error::other(format!("iCloud redirected ({status}) with no new address")));
+                }
+                current = join_url(&current, &loc);
+                continue;
+            }
+            return Ok(DavResponse {
+                status,
+                etag,
+                body: bytes.to_vec(),
+                url: current,
+                partition,
+                instance,
+            });
         }
-        Ok(res)
+        Err(io::Error::other("too many iCloud redirects"))
+    }
+
+    pub fn propfind(&self, url: &str, depth: &str, xml: &str) -> io::Result<(u16, String, Vec<u8>)> {
+        let mut res = self.propfind_at(url, depth, xml)?;
+        if res.body.len() > MAX_PROPFIND {
+            res.body.truncate(MAX_PROPFIND);
+        }
+        Ok((res.status, res.etag, res.body))
     }
 
     pub fn put_card(&self, url: &str, contact: &Contact, etag: Option<&str>) -> io::Result<String> {
@@ -241,22 +301,37 @@ struct Span {
 }
 
 fn find_tag(lower: &str, from: usize, tag: &str) -> Option<Span> {
-    let needle = format!("{tag}>");
     let mut s = from;
-    while let Some(p) = lower[s..].find(&needle) {
+    while let Some(p) = lower[s..].find(tag) {
         let abs = s + p;
-        // require '<' or ':' just before the tag name
         if abs == 0 {
             s = abs + 1;
             continue;
         }
-        let before = &lower[..abs];
-        if before.ends_with('<') || before.ends_with(':') {
-            return Some(Span {
-                end: abs + needle.len(),
-            });
+        let before = lower.as_bytes()[abs - 1] as char;
+        if before != '<' && before != ':' {
+            s = abs + 1;
+            continue;
         }
-        s = abs + 1;
+        let after_i = abs + tag.len();
+        let after = lower.get(after_i..).unwrap_or("");
+        let first = after.chars().next();
+        let ok = matches!(first, Some('>' | ' ' | '\t' | '\n' | '\r' | '/'));
+        if !ok {
+            s = abs + 1;
+            continue;
+        }
+        let Some(gt) = after.find('>') else {
+            return None;
+        };
+        let open = &after[..gt];
+        if open.trim_end().ends_with('/') {
+            s = after_i + gt + 1;
+            continue;
+        }
+        return Some(Span {
+            end: after_i + gt + 1,
+        });
     }
     None
 }
@@ -276,12 +351,180 @@ fn find_close(lower: &str, from: usize, tag: &str) -> Option<usize> {
     None
 }
 
+/// First href nested inside `<prop>…</prop>`.
+pub fn href_in_prop(xml: &str, prop: &str) -> Option<String> {
+    let lower = xml.to_ascii_lowercase();
+    let open = find_tag(&lower, 0, prop)?;
+    let close = find_close(&lower, open.end, prop)?;
+    xml_hrefs(&xml[open.end..close]).into_iter().next()
+}
+
+pub fn pick_principal(xml: &str) -> Option<String> {
+    if let Some(h) = href_in_prop(xml, "current-user-principal") {
+        if !h.to_ascii_lowercase().contains(".well-known") {
+            return Some(h);
+        }
+    }
+    xml_hrefs(xml).into_iter().find(|h| {
+        let l = h.to_ascii_lowercase();
+        (l.contains("/principal") || l.contains("/principals/")) && !l.contains(".well-known")
+    })
+}
+
+pub fn contacts_host_from_xml(xml: &str) -> Option<String> {
+    for h in xml_hrefs(xml) {
+        let rest = h.strip_prefix("https://").unwrap_or("");
+        if rest.is_empty() {
+            continue;
+        }
+        let hostport = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let host = hostport.split(':').next().unwrap_or("").to_ascii_lowercase();
+        if host.ends_with("-contacts.icloud.com") {
+            return Some(host);
+        }
+    }
+    None
+}
+
+pub fn xml_shape(xml: &str) -> String {
+    let t = xml.trim_start();
+    let xmlish = t.starts_with('<') || t.to_ascii_lowercase().contains("multistatus");
+    let gzip = xml.as_bytes().starts_with(&[0x1f, 0x8b]);
+    format!("bytes={} xml={} gzip={}", xml.len(), xmlish, gzip)
+}
+
+fn response_chunks(xml: &str) -> Vec<String> {
+    let lower = xml.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(open) = find_tag(&lower, i, "response") {
+        match find_close(&lower, open.end, "response") {
+            Some(end) => {
+                out.push(xml[open.end..end].to_string());
+                i = end + 2;
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+fn resourcetype_is_addressbook(chunk: &str) -> bool {
+    let lower = chunk.to_ascii_lowercase();
+    let Some(open) = find_tag(&lower, 0, "resourcetype") else {
+        return false;
+    };
+    let Some(end) = find_close(&lower, open.end, "resourcetype") else {
+        return false;
+    };
+    let rt = &lower[open.end..end];
+    rt.contains("addressbook") && !rt.contains("addressbook-home-set")
+}
+
+pub fn addressbook_hrefs(xml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for chunk in response_chunks(xml) {
+        if resourcetype_is_addressbook(&chunk) {
+            if let Some(h) = xml_hrefs(&chunk).into_iter().next() {
+                out.push(h);
+            }
+        }
+    }
+    out
+}
+
+pub fn card_hrefs(xml: &str, book: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for chunk in response_chunks(xml) {
+        if resourcetype_is_addressbook(&chunk) {
+            continue;
+        }
+        for h in xml_hrefs(&chunk) {
+            let l = h.to_ascii_lowercase();
+            let joined = join_url(book, &h);
+            if joined == *book || joined.trim_end_matches('/') == book.trim_end_matches('/') {
+                continue;
+            }
+            if l.ends_with('/') {
+                continue;
+            }
+            out.push(h);
+        }
+    }
+    if out.is_empty() {
+        for h in xml_hrefs(xml) {
+            let l = h.to_ascii_lowercase();
+            if l.ends_with(".vcf") || l.contains("/card/") && !l.ends_with('/') {
+                out.push(h);
+            }
+        }
+    }
+    out
+}
+
+pub fn vcards_in_multistatus(xml: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for chunk in response_chunks(xml) {
+        let href = xml_hrefs(&chunk).into_iter().next().unwrap_or_default();
+        for data in xml_tag_values(&chunk, "address-data") {
+            // xml_tag_values already unescapes XML entities.
+            if data.to_ascii_uppercase().contains("BEGIN:VCARD") {
+                out.push((href.clone(), data));
+            }
+        }
+    }
+    out
+}
+
 fn decode_xml(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '&' {
+            out.push(c);
+            continue;
+        }
+        let mut ent = String::from("&");
+        while let Some(&n) = chars.peek() {
+            ent.push(n);
+            chars.next();
+            if n == ';' || ent.len() > 12 {
+                break;
+            }
+        }
+        if !ent.ends_with(';') {
+            out.push_str(&ent);
+            continue;
+        }
+        let decoded = match ent.as_str() {
+            "&amp;" => Some('&'),
+            "&lt;" => Some('<'),
+            "&gt;" => Some('>'),
+            "&quot;" => Some('"'),
+            "&apos;" => Some('\''),
+            _ => numeric_entity(&ent),
+        };
+        if let Some(ch) = decoded {
+            if ch != '\r' {
+                out.push(ch);
+            }
+        } else {
+            out.push_str(&ent);
+        }
+    }
+    out
+}
+
+fn numeric_entity(ent: &str) -> Option<char> {
+    let body = ent.trim_start_matches('&').trim_end_matches(';');
+    let num = if let Some(hex) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
+        u32::from_str_radix(hex, 16).ok()?
+    } else if let Some(dec) = body.strip_prefix('#') {
+        dec.parse::<u32>().ok()?
+    } else {
+        return None;
+    };
+    char::from_u32(num)
 }
 
 pub fn join_url(base: &str, href: &str) -> String {
@@ -299,6 +542,30 @@ pub fn join_url(base: &str, href: &str) -> String {
         let base = base.trim_end_matches('/');
         format!("{base}/{href}")
     }
+}
+
+/// iCloud’s front door often 401s and points at a numbered contacts host.
+pub fn icloud_contacts_host(partition: &str, instance: &str) -> Option<String> {
+    let p = partition.trim();
+    if !p.is_empty() && p.len() <= 8 && p.chars().all(|c| c.is_ascii_digit()) {
+        return Some(format!("p{p}-contacts.icloud.com"));
+    }
+    let hay = instance.to_ascii_lowercase();
+    if let Some(idx) = hay.find("-carddav") {
+        let before = &hay[..idx];
+        let start = before
+            .rfind(|c: char| !c.is_ascii_alphanumeric())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let prefix = &before[start..];
+        if prefix.starts_with('p')
+            && prefix.len() > 1
+            && prefix[1..].chars().all(|c| c.is_ascii_digit())
+        {
+            return Some(format!("{prefix}-contacts.icloud.com"));
+        }
+    }
+    None
 }
 
 pub const CURRENT_USER_PRINCIPAL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -328,6 +595,14 @@ pub const ADDRESSBOOK_INDEX: &str = r#"<?xml version="1.0" encoding="utf-8"?>
   </d:prop>
 </d:propfind>"#;
 
+pub const ADDRESSBOOK_QUERY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<c:addressbook-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
+  <d:prop>
+    <d:getetag/>
+    <c:address-data/>
+  </d:prop>
+</c:addressbook-query>"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +621,91 @@ mod tests {
         let xml = r#"<d:multistatus xmlns:d="DAV:"><d:response><d:href>/principal/foo/</d:href></d:response></d:multistatus>"#;
         let hs = xml_hrefs(xml);
         assert_eq!(hs[0], "/principal/foo/");
+    }
+
+    #[test]
+    fn xml_numeric_entities() {
+        let xml = "<href>Tom &amp; Jerry&#13;</href>";
+        assert_eq!(xml_hrefs(xml)[0], "Tom & Jerry");
+        let xml = "<href>&#43;61411112222</href>";
+        assert_eq!(xml_hrefs(xml)[0], "+61411112222");
+        let xml = r#"<response><href>/a.vcf</href><address-data>BEGIN:VCARD
+FN:Tom &amp; Jerry&#13;
+TEL:&#43;61411112222
+UID:1
+END:VCARD</address-data></response>"#;
+        let cards = vcards_in_multistatus(xml);
+        assert!(cards[0].1.contains("Tom & Jerry"));
+        assert!(cards[0].1.contains("+61411112222"));
+        assert!(!cards[0].1.contains("&#"));
+    }
+
+    #[test]
+    fn href_with_attributes() {
+        let xml = r#"<d:href xmlns:d="DAV:">/abc/card/x.vcf</d:href>"#;
+        let hs = xml_hrefs(xml);
+        assert_eq!(hs[0], "/abc/card/x.vcf");
+    }
+
+    #[test]
+    fn principal_nested_href() {
+        let xml = r#"<d:multistatus xmlns:d="DAV:">
+          <d:response>
+            <d:href>/</d:href>
+            <d:propstat>
+              <d:prop>
+                <d:current-user-principal>
+                  <d:href>/12345/principal/</d:href>
+                </d:current-user-principal>
+              </d:prop>
+            </d:propstat>
+          </d:response>
+        </d:multistatus>"#;
+        assert_eq!(href_in_prop(xml, "current-user-principal").as_deref(), Some("/12345/principal/"));
+    }
+
+    #[test]
+    fn picks_addressbook_collection() {
+        let xml = r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
+          <d:response>
+            <d:href>/12345/carddavhome/</d:href>
+            <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat>
+          </d:response>
+          <d:response>
+            <d:href>/12345/carddavhome/card/</d:href>
+            <d:propstat><d:prop><d:resourcetype><d:collection/><c:addressbook/></d:resourcetype></d:prop></d:propstat>
+          </d:response>
+        </d:multistatus>"#;
+        let books = addressbook_hrefs(xml);
+        assert_eq!(books, vec!["/12345/carddavhome/card/".to_string()]);
+    }
+
+    #[test]
+    fn partition_host_from_icloud_headers() {
+        assert_eq!(
+            icloud_contacts_host("60", "").as_deref(),
+            Some("p60-contacts.icloud.com")
+        );
+        assert_eq!(
+            icloud_contacts_host("", "carddav:3:p43-carddav-868b76885f-ntn7b:8080").as_deref(),
+            Some("p43-contacts.icloud.com")
+        );
+    }
+
+    #[test]
+    fn principal_from_icloud_style_xml() {
+        let xml = r#"<multistatus xmlns="DAV:">
+          <response>
+            <href>/.well-known/carddav</href>
+            <propstat>
+              <prop>
+                <current-user-principal>
+                  <href>/112233/principal/</href>
+                </current-user-principal>
+              </prop>
+            </propstat>
+          </response>
+        </multistatus>"#;
+        assert_eq!(pick_principal(xml).as_deref(), Some("/112233/principal/"));
     }
 }

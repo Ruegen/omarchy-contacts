@@ -38,6 +38,8 @@ pub struct Contact {
     pub etag: Option<String>,
     #[serde(skip)]
     pub href: Option<String>,
+    #[serde(skip)]
+    pub photo_path: Option<String>,
 }
 
 impl Contact {
@@ -110,6 +112,7 @@ impl Contact {
             "phone": self.primary_phone(),
             "email": self.emails.first().map(|e| e.value.clone()).unwrap_or_default(),
             "has_photo": self.has_photo,
+            "photo_file": self.photo_path.clone().unwrap_or_default(),
         })
     }
 

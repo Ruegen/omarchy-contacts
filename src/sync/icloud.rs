@@ -1,14 +1,15 @@
 use std::io::{self, Write};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::contact::Contact;
 use crate::store::Store;
 use crate::sync::carddav::{
-    join_url, xml_hrefs, xml_tag_values, CardDavClient, ADDRESSBOOK_HOME, ADDRESSBOOK_INDEX,
-    ADDRESSBOOK_LIST, CURRENT_USER_PRINCIPAL,
+    addressbook_hrefs, card_hrefs, contacts_host_from_xml, href_in_prop, icloud_contacts_host, join_url,
+    pick_principal, vcards_in_multistatus, xml_hrefs, xml_shape, CardDavClient, DavResponse,
+    ADDRESSBOOK_HOME, ADDRESSBOOK_INDEX, ADDRESSBOOK_LIST, ADDRESSBOOK_QUERY, CURRENT_USER_PRINCIPAL,
 };
-use crate::vcard::rev_newer;
+use crate::vcard::{parse_card, rev_newer};
 
 const WELL_KNOWN: &str = "https://contacts.icloud.com/.well-known/carddav";
 
@@ -39,129 +40,298 @@ impl IcloudSync {
         })
     }
 
-    pub fn discover(&mut self) -> io::Result<String> {
-        // RFC 6764: PROPFIND /.well-known/carddav — iCloud redirects to the real host.
-        let (status, loc_or_etag, body) = self.client.propfind(WELL_KNOWN, "0", CURRENT_USER_PRINCIPAL)?;
-        let start = if (300..400).contains(&status) && loc_or_etag.starts_with("https://") {
-            loc_or_etag
-        } else if status == 207 || status == 200 {
-            WELL_KNOWN.to_string()
-        } else {
-            return Err(io::Error::other(format!("discovery {status}")));
-        };
-        let xml = String::from_utf8_lossy(&body);
-        let principal = xml_hrefs(&xml)
-            .into_iter()
-            .find(|h| !h.contains(".well-known"))
-            .unwrap_or_else(|| start.clone());
-        let principal_url = join_url(&start, &principal);
+    pub fn discover(&mut self, log: &mut impl Write) -> io::Result<String> {
+        let _ = writeln!(log, "{} discover start", stamp());
+        let mut principal_res = self.client.propfind_at(WELL_KNOWN, "0", CURRENT_USER_PRINCIPAL)?;
+        self.log_hop(log, "discover", &principal_res)?;
+        let mut principal = principal_from(&principal_res);
 
-        let (_, _, home_body) = self.client.propfind(&principal_url, "0", ADDRESSBOOK_HOME)?;
-        let home_xml = String::from_utf8_lossy(&home_body);
-        let home = xml_hrefs(&home_xml)
+        if principal.is_none() {
+            let xml = String::from_utf8_lossy(&principal_res.body);
+            let hop = icloud_contacts_host(&principal_res.partition, &principal_res.instance)
+                .or_else(|| contacts_host_from_xml(&xml));
+            if let Some(host) = hop {
+                let next = format!("https://{host}/");
+                if host_only(&principal_res.url) != host {
+                    let _ = writeln!(log, "{} discover hop host={}", stamp(), host);
+                    principal_res = self.client.propfind_at(&next, "0", CURRENT_USER_PRINCIPAL)?;
+                    self.log_hop(log, "discover", &principal_res)?;
+                    principal = principal_from(&principal_res);
+                }
+            }
+        }
+
+        if principal.is_none() {
+            if host_only(&principal_res.url) != "contacts.icloud.com"
+                || principal_res.url.contains("well-known")
+            {
+                let _ = writeln!(log, "{} discover retry host=contacts.icloud.com", stamp());
+                principal_res = self.client.propfind_at("https://contacts.icloud.com/", "0", CURRENT_USER_PRINCIPAL)?;
+                self.log_hop(log, "discover", &principal_res)?;
+                principal = principal_from(&principal_res);
+            }
+        }
+
+        if principal_res.status == 401 || principal_res.status == 403 {
+            return Err(io::Error::other(
+                "iCloud refused the sign-in. Check the Apple ID and app-specific password.",
+            ));
+        }
+        let principal = principal.ok_or_else(|| {
+            io::Error::other("iCloud did not return an account path")
+        })?;
+        let principal_url = join_url(&principal_res.url, &principal);
+        let _ = writeln!(log, "{} principal host={}", stamp(), host_only(&principal_url));
+
+        let home_res = self.client.propfind_at(&principal_url, "0", ADDRESSBOOK_HOME)?;
+        if home_res.status == 401 || home_res.status == 403 {
+            return Err(io::Error::other(
+                "iCloud refused the sign-in. Check the Apple ID and app-specific password.",
+            ));
+        }
+        if !dav_ok(&home_res) {
+            return Err(io::Error::other(format!(
+                "could not find your address book home ({})",
+                home_res.status
+            )));
+        }
+        let home_xml = String::from_utf8_lossy(&home_res.body);
+        let home = href_in_prop(&home_xml, "addressbook-home-set")
+            .or_else(|| xml_hrefs(&home_xml).into_iter().find(|h| h != &principal))
+            .ok_or_else(|| io::Error::other("no addressbook home"))?;
+        let home_url = join_url(&home_res.url, &home);
+
+        let list_res = self.client.propfind_at(&home_url, "1", ADDRESSBOOK_LIST)?;
+        if list_res.status == 401 || list_res.status == 403 {
+            return Err(io::Error::other(
+                "iCloud refused the sign-in. Check the Apple ID and app-specific password.",
+            ));
+        }
+        if !dav_ok(&list_res) {
+            return Err(io::Error::other(format!(
+                "could not list address books ({})",
+                list_res.status
+            )));
+        }
+        let list_xml = String::from_utf8_lossy(&list_res.body);
+        let book = addressbook_hrefs(&list_xml)
             .into_iter()
             .next()
-            .ok_or_else(|| io::Error::other("no addressbook home"))?;
-        let home_url = join_url(&principal_url, &home);
-
-        let (_, _, list_body) = self.client.propfind(&home_url, "1", ADDRESSBOOK_LIST)?;
-        let list_xml = String::from_utf8_lossy(&list_body);
-        let hrefs = xml_hrefs(&list_xml);
-        let book = hrefs
-            .into_iter()
-            .find(|h| h != &home && !h.ends_with('/').then(|| h.trim_end_matches('/')).unwrap_or(h).eq(&home))
             .or_else(|| {
-                // Prefer a collection that is not the home itself.
-                xml_tag_values(&list_xml, "href")
+                xml_hrefs(&list_xml)
                     .into_iter()
-                    .find(|h| join_url(&home_url, h) != home_url)
+                    .find(|h| join_url(&home_url, h) != home_url && join_url(&home_url, h).trim_end_matches('/') != home_url.trim_end_matches('/'))
             })
             .ok_or_else(|| io::Error::other("no address book"))?;
-        let book_url = join_url(&home_url, &book);
+        let book_url = join_url(&list_res.url, &book);
+        let _ = writeln!(log, "{} book host={}", stamp(), host_only(&book_url));
         self.book = Some(book_url.clone());
         Ok(book_url)
     }
 
-    pub fn book_url(&mut self) -> io::Result<String> {
+    fn log_hop(&self, log: &mut impl Write, phase: &str, res: &DavResponse) -> io::Result<()> {
+        let xml = String::from_utf8_lossy(&res.body);
+        let _ = writeln!(
+            log,
+            "{} {} http {} host={} {}",
+            stamp(),
+            phase,
+            res.status,
+            host_only(&res.url),
+            xml_shape(&xml)
+        );
+        Ok(())
+    }
+
+    pub fn book_url(&mut self, log: &mut impl Write) -> io::Result<String> {
         if let Some(b) = &self.book {
             return Ok(b.clone());
         }
-        self.discover()
+        self.discover(log)
+    }
+
+    fn ingest(
+        &self,
+        store: &mut Store,
+        log: &mut impl Write,
+        url: String,
+        etag: String,
+        contact: Contact,
+        remote_uids: &mut std::collections::HashSet<String>,
+    ) -> io::Result<()> {
+        let mut contact = contact;
+        contact.href = Some(url.clone());
+        if !etag.is_empty() {
+            contact.etag = Some(etag);
+        }
+        contact.normalize();
+        remote_uids.insert(contact.uid.clone());
+        if let Some(local) = store.get(&contact.uid).cloned() {
+            if rev_newer(&local.rev, &contact.rev) {
+                let put_url = local.href.clone().unwrap_or(url);
+                match self.client.put_card(&put_url, &local, local.etag.as_deref()) {
+                    Ok(_) => {
+                        let _ = writeln!(log, "{} push uid={}", stamp(), log_uid(&local.uid));
+                    }
+                    Err(e) => {
+                        let _ = writeln!(log, "{} push fail {}", stamp(), e);
+                    }
+                }
+                return Ok(());
+            }
+        }
+        store.replace_from_remote(contact)
     }
 
     pub fn run(
         &mut self,
         store: &mut Store,
         log: &mut impl Write,
-        mut progress: impl FnMut(SyncProgress),
+        mut progress: impl FnMut(SyncProgress, &Store),
     ) -> io::Result<SyncProgress> {
-        let book = self.book_url()?;
+        let book = self.book_url(log)?;
         let _ = writeln!(log, "{} pull start host={}", stamp(), host_only(&book));
-        let (_, _, index) = self.client.propfind(&book, "1", ADDRESSBOOK_INDEX)?;
-        let xml = String::from_utf8_lossy(&index);
-        let hrefs: Vec<String> = xml_hrefs(&xml)
-            .into_iter()
-            .filter(|h| {
-                let l = h.to_ascii_lowercase();
-                l.ends_with(".vcf") || l.contains("/card") || (!h.ends_with('/') && h != &book)
-            })
-            .collect();
-        let total = hrefs.len() as u32;
         progress(SyncProgress {
-            phase: "pull".into(),
+            phase: "listing".into(),
             done: 0,
-            total,
+            total: 0,
             error: String::new(),
-        });
+        }, store);
+
         let mut remote_uids = std::collections::HashSet::new();
-        let start = Instant::now();
-        for (i, href) in hrefs.iter().enumerate() {
-            let url = join_url(&book, href);
-            match self.client.get_card(&url) {
-                Ok(mut remote) => {
-                    remote.contact.href = Some(url.clone());
-                    remote.contact.etag = Some(remote.etag.clone());
-                    remote.contact.normalize();
-                    remote_uids.insert(remote.contact.uid.clone());
-                    if let Some(local) = store.get(&remote.contact.uid).cloned() {
-                        if rev_newer(&local.rev, &remote.contact.rev) {
-                            let put_url = local.href.clone().unwrap_or(url);
-                            match self.client.put_card(&put_url, &local, local.etag.as_deref()) {
-                                Ok(_) => {
-                                    let _ = writeln!(log, "{} push uid={}", stamp(), log_uid(&local.uid));
-                                }
-                                Err(e) => {
-                                    let _ = writeln!(log, "{} push fail {}", stamp(), e);
-                                }
-                            }
-                        } else if rev_newer(&remote.contact.rev, &local.rev)
-                            || local.rev == remote.contact.rev
-                        {
-                            // Equal REV: still take remote only when we have no local dirty flag.
-                            // Last-write-wins by REV: equal means keep local if we just pushed;
-                            // otherwise accept remote.
-                            if local.rev != remote.contact.rev || local.etag != remote.contact.etag {
-                                store.replace_from_remote(remote.contact)?;
-                            }
-                        }
-                    } else {
-                        store.replace_from_remote(remote.contact)?;
-                    }
-                }
-                Err(e) => {
-                    let _ = writeln!(log, "{} get fail {}", stamp(), e);
-                }
+        let mut pulled = 0u32;
+
+        let query = self.client.report_at(&book, ADDRESSBOOK_QUERY);
+        let bulk = match query {
+            Ok(res) if res.status == 207 || res.status == 200 => {
+                let xml = String::from_utf8_lossy(&res.body);
+                vcards_in_multistatus(&xml)
             }
+            Ok(res) => {
+                let _ = writeln!(log, "{} report status={}", stamp(), res.status);
+                Vec::new()
+            }
+            Err(e) => {
+                let _ = writeln!(log, "{} report skip {}", stamp(), e);
+                Vec::new()
+            }
+        };
+
+        if !bulk.is_empty() {
+            let hrefs: Vec<String> = bulk.iter().map(|(h, _)| h.clone()).collect();
+            let total = bulk.len() as u32;
             progress(SyncProgress {
-                phase: if i < hrefs.len() / 2 { "pull" } else { "photos" }.into(),
-                done: (i + 1) as u32,
+                phase: "pull".into(),
+                done: 0,
                 total,
                 error: String::new(),
-            });
-            let _ = start;
+            }, store);
+            for (i, (href, text)) in bulk.into_iter().enumerate() {
+                let url = join_url(&book, &href);
+                match parse_card(&text) {
+                    Ok(contact) => {
+                        if let Err(e) = self.ingest(store, log, url, String::new(), contact, &mut remote_uids)
+                        {
+                            let _ = writeln!(log, "{} save fail {}", stamp(), e);
+                        } else {
+                            pulled += 1;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = writeln!(log, "{} parse fail {}", stamp(), e);
+                    }
+                }
+                progress(SyncProgress {
+                    phase: "pull".into(),
+                    done: (i + 1) as u32,
+                    total,
+                    error: String::new(),
+                }, store);
+            }
+            // The fast listing omits photos. Fetch each card so pictures land.
+            let total = hrefs.len() as u32;
+            progress(SyncProgress {
+                phase: "photos".into(),
+                done: 0,
+                total,
+                error: String::new(),
+            }, store);
+            for (i, href) in hrefs.iter().enumerate() {
+                let url = join_url(&book, href);
+                match self.client.get_card(&url) {
+                    Ok(remote) => {
+                        if let Err(e) = self.ingest(
+                            store,
+                            log,
+                            url,
+                            remote.etag,
+                            remote.contact,
+                            &mut remote_uids,
+                        ) {
+                            let _ = writeln!(log, "{} photo fail {}", stamp(), e);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = writeln!(log, "{} get fail {}", stamp(), e);
+                    }
+                }
+                progress(SyncProgress {
+                    phase: "photos".into(),
+                    done: (i + 1) as u32,
+                    total,
+                    error: String::new(),
+                }, store);
+            }
+        } else {
+            let index = self.client.propfind_at(&book, "1", ADDRESSBOOK_INDEX)?;
+            if index.status == 401 || index.status == 403 {
+                return Err(io::Error::other(
+                    "iCloud refused the sign-in. Check the Apple ID and app-specific password.",
+                ));
+            }
+            if index.status != 207 && index.status != 200 {
+                return Err(io::Error::other(format!("could not list contacts ({})", index.status)));
+            }
+            let xml = String::from_utf8_lossy(&index.body);
+            let hrefs = card_hrefs(&xml, &book);
+            let total = hrefs.len() as u32;
+            let _ = writeln!(log, "{} index n={total}", stamp());
+            progress(SyncProgress {
+                phase: "pull".into(),
+                done: 0,
+                total,
+                error: String::new(),
+            }, store);
+            for (i, href) in hrefs.iter().enumerate() {
+                let url = join_url(&book, href);
+                match self.client.get_card(&url) {
+                    Ok(remote) => {
+                        if let Err(e) = self.ingest(
+                            store,
+                            log,
+                            url,
+                            remote.etag,
+                            remote.contact,
+                            &mut remote_uids,
+                        ) {
+                            let _ = writeln!(log, "{} save fail {}", stamp(), e);
+                        } else {
+                            pulled += 1;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = writeln!(log, "{} get fail {}", stamp(), e);
+                    }
+                }
+                progress(SyncProgress {
+                    phase: "pull".into(),
+                    done: (i + 1) as u32,
+                    total,
+                    error: String::new(),
+                }, store);
+            }
         }
 
-        // Push local-only contacts.
         let locals: Vec<Contact> = store
             .all()
             .into_iter()
@@ -169,7 +339,7 @@ impl IcloudSync {
             .cloned()
             .collect();
         for c in locals {
-            let url = format!("{}{}.vcf", book.trim_end_matches('/').to_string() + "/", c.uid);
+            let url = format!("{}/{}.vcf", book.trim_end_matches('/'), c.uid);
             match self.client.put_card(&url, &c, None) {
                 Ok(_) => {
                     let _ = writeln!(log, "{} push new uid={}", stamp(), log_uid(&c.uid));
@@ -179,14 +349,30 @@ impl IcloudSync {
                 }
             }
         }
-        let _ = writeln!(log, "{} pull done n={total}", stamp());
+        let _ = writeln!(log, "{} pull done n={pulled}", stamp());
+        if pulled == 0 && !remote_uids.is_empty() {
+            return Err(io::Error::other(
+                "iCloud sent contacts, but none could be saved",
+            ));
+        }
         Ok(SyncProgress {
             phase: "idle".into(),
-            done: total,
-            total,
+            done: pulled,
+            total: pulled,
             error: String::new(),
         })
     }
+}
+
+fn dav_ok(res: &DavResponse) -> bool {
+    res.status == 207 || res.status == 200
+}
+
+fn principal_from(res: &DavResponse) -> Option<String> {
+    if !dav_ok(res) {
+        return None;
+    }
+    pick_principal(&String::from_utf8_lossy(&res.body))
 }
 
 fn stamp() -> String {

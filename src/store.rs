@@ -3,7 +3,7 @@ use std::io;
 
 use crate::contact::Contact;
 use crate::fsutil::Dir;
-use crate::paths::{uid_file_name, Layout, MAX_CONTACTS, MAX_VCARD_BYTES};
+use crate::paths::{uid_file_name, uid_photo_name, Layout, MAX_CONTACTS, MAX_VCARD_BYTES};
 use crate::vcard::{now_rev, parse_card, serialize_card, split_cards, ParseError};
 
 pub struct Store {
@@ -39,6 +39,8 @@ impl Store {
                         if c.uid.is_empty() {
                             c.uid = name.trim_end_matches(".vcf").to_string();
                         }
+                        c.normalize();
+                        attach_photo_path(&self.layout, &mut c);
                         self.contacts.insert(c.uid.clone(), c);
                     }
                 }
@@ -77,6 +79,7 @@ impl Store {
             return Err(io::Error::other("too many contacts"));
         }
         self.write(&c)?;
+        attach_photo_path(&self.layout, &mut c);
         self.contacts.insert(c.uid.clone(), c.clone());
         Ok(c)
     }
@@ -85,6 +88,9 @@ impl Store {
         let name = uid_file_name(uid)?;
         if self.contacts.remove(uid).is_none() {
             return Ok(false);
+        }
+        if let Ok(jpg) = uid_photo_name(uid) {
+            let _ = self.layout.contacts.unlink(&jpg);
         }
         match self.layout.contacts.unlink(&name) {
             Ok(()) => Ok(true),
@@ -96,7 +102,15 @@ impl Store {
     pub fn write(&self, c: &Contact) -> io::Result<()> {
         let name = uid_file_name(&c.uid)?;
         let text = serialize_card(c);
-        self.layout.contacts.atomic_write(&name, text.as_bytes())
+        self.layout.contacts.atomic_write(&name, text.as_bytes())?;
+        if let Ok(jpg) = uid_photo_name(&c.uid) {
+            if let Some(jpeg) = &c.photo_jpeg {
+                self.layout.contacts.atomic_write(&jpg, jpeg)?;
+            } else {
+                let _ = self.layout.contacts.unlink(&jpg);
+            }
+        }
+        Ok(())
     }
 
     pub fn import_text(&mut self, text: &str) -> io::Result<ImportResult> {
@@ -136,12 +150,30 @@ impl Store {
         let mut c = c;
         c.normalize();
         self.write(&c)?;
+        attach_photo_path(&self.layout, &mut c);
         self.contacts.insert(c.uid.clone(), c);
         Ok(())
     }
 
     pub fn contacts_dir(&self) -> &Dir {
         &self.layout.contacts
+    }
+}
+
+fn attach_photo_path(layout: &Layout, c: &mut Contact) {
+    if !c.has_photo {
+        c.photo_path = None;
+        return;
+    }
+    if let Ok(name) = uid_photo_name(&c.uid) {
+        c.photo_path = Some(
+            layout
+                .data_path
+                .join("contacts")
+                .join(name)
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
 }
 

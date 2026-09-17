@@ -22,6 +22,7 @@ pub struct Daemon {
     config: Config,
     watch: DropWatch,
     last_sync: Option<Instant>,
+    last_attempt: Option<Instant>,
     syncing: bool,
     progress: SyncProgress,
 }
@@ -35,6 +36,7 @@ impl Daemon {
             config,
             watch: DropWatch::new(),
             last_sync: None,
+            last_attempt: None,
             syncing: false,
             progress: SyncProgress::default(),
         })
@@ -244,6 +246,7 @@ impl Daemon {
                 return Err(io::Error::other("sync is cooling down (2 min minimum)"));
             }
         }
+        self.last_attempt = Some(Instant::now());
         let password = secrets::load_password()?;
         let apple_id = self.config.sync.apple_id.clone();
         self.syncing = true;
@@ -256,20 +259,26 @@ impl Daemon {
         let mut client = IcloudSync::connect(&apple_id, &password)?;
         emit_progress(&self.progress);
         let mut log_buf = Vec::new();
-        let result = client.run(&mut self.store, &mut log_buf, |p| {
-            self.progress = p.clone();
+        let mut latest = self.progress.clone();
+        let result = client.run(&mut self.store, &mut log_buf, |p, store| {
+            latest = p.clone();
             emit_progress(&p);
+            emit_list(store);
         });
+        self.progress = latest;
         append_log(&self.store.layout, &log_buf);
         self.syncing = false;
-        self.last_sync = Some(Instant::now());
         match result {
             Ok(p) => {
+                self.last_sync = Some(Instant::now());
                 self.progress = p.clone();
+                emit_progress(&self.progress);
                 Ok(p)
             }
             Err(e) => {
-                self.progress.error = "sync failed".into();
+                self.progress.phase = "idle".into();
+                self.progress.error = e.to_string();
+                emit_progress(&self.progress);
                 Err(e)
             }
         }
@@ -284,9 +293,13 @@ impl Daemon {
         }
         let mut synced = false;
         if self.config.sync.enabled && !self.syncing {
+            let cooling = self
+                .last_attempt
+                .map(|t| t.elapsed() < Duration::from_secs(MIN_SYNC_SECS))
+                .unwrap_or(false);
             let due = match self.last_sync {
-                None => true,
-                Some(t) => t.elapsed() >= interval(&self.config),
+                None => !cooling,
+                Some(t) => t.elapsed() >= interval(&self.config) && !cooling,
             };
             if due {
                 synced = self.run_sync().is_ok();
@@ -414,6 +427,18 @@ fn peer_is_us(stream: &UnixStream) -> bool {
 
 fn emit_progress(p: &SyncProgress) {
     let line = json!({"ok": true, "progress": p});
+    let mut out = io::stdout();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
+}
+
+fn emit_list(store: &Store) {
+    let contacts: Vec<Value> = store
+        .search("")
+        .into_iter()
+        .map(|c| c.for_list())
+        .collect();
+    let line = json!({"ok": true, "contacts": contacts, "count": store.count()});
     let mut out = io::stdout();
     let _ = writeln!(out, "{line}");
     let _ = out.flush();

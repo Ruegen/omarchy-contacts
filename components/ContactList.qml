@@ -50,6 +50,7 @@ Rectangle {
           anchors.verticalCenter: parent.verticalCenter
           name: String(modelData.fn || "")
           hasPhoto: !!modelData.has_photo
+          photoFile: String(modelData.photo_file || "")
           size: Style.space(32)
           foreground: root.textColor
           background: root.background

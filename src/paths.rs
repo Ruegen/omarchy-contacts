@@ -1,12 +1,12 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::fsutil::{is_safe_hidden_name, Dir};
+use crate::fsutil::{is_safe_hidden_name, is_safe_name, Dir};
 
 pub const APP_DIR: &str = "omarchy-contacts";
 pub const MAX_VCARD_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
-pub const MAX_PHOTO_BYTES: usize = 1024 * 1024;
+pub const MAX_PHOTO_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_IPC_LINE: usize = 2 * 1024 * 1024;
 pub const MAX_LOG_BYTES: usize = 256 * 1024;
 pub const MAX_CONTACTS: usize = 10_000;
@@ -131,19 +131,39 @@ fn mkdir_walk(path: &Path) -> io::Result<Dir> {
 }
 
 pub fn uid_file_name(uid: &str) -> io::Result<String> {
-    if uid.len() > 80 || uid.is_empty() {
+    let uid = uid.trim();
+    if uid.is_empty() || uid.len() > 512 {
         return Err(io::Error::other("bad uid"));
     }
-    if !uid
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if uid.contains('\0') {
         return Err(io::Error::other("bad uid"));
     }
-    if uid == "." || uid == ".." {
+    // Apple IDs often look like UUID/ABPerson or urn:uuid:…. Those characters
+    // cannot be a filename, but the contact still has to round-trip.
+    let mut safe = String::new();
+    for c in uid.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            safe.push(c);
+        } else if matches!(c, '/' | ':' | '.' | '@' | '+' | ' ') {
+            if !safe.ends_with('-') {
+                safe.push('-');
+            }
+        }
+        if safe.len() >= 120 {
+            break;
+        }
+    }
+    let safe = safe.trim_matches('-').to_string();
+    let file = format!("{safe}.vcf");
+    if safe.is_empty() || !is_safe_name(&file) {
         return Err(io::Error::other("bad uid"));
     }
-    Ok(format!("{uid}.vcf"))
+    Ok(file)
+}
+
+pub fn uid_photo_name(uid: &str) -> io::Result<String> {
+    let vcf = uid_file_name(uid)?;
+    Ok(vcf.replacen(".vcf", ".jpg", 1))
 }
 
 #[cfg(test)]
@@ -152,9 +172,16 @@ mod tests {
 
     #[test]
     fn uid_names() {
-        assert!(uid_file_name("a1b2-c3").is_ok());
-        assert!(uid_file_name("../etc").is_err());
-        assert!(uid_file_name("a/b").is_err());
+        assert_eq!(
+            uid_file_name("40A5A3C0-1111-2222-3333-444444444444/ABPerson").unwrap(),
+            "40A5A3C0-1111-2222-3333-444444444444-ABPerson.vcf"
+        );
+        assert_eq!(
+            uid_file_name("urn:uuid:550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            "urn-uuid-550e8400-e29b-41d4-a716-446655440000.vcf"
+        );
+        assert!(uid_file_name("../etc/passwd").unwrap().ends_with(".vcf"));
+        assert!(!uid_file_name("../etc/passwd").unwrap().contains('/'));
         assert!(uid_file_name("").is_err());
     }
 }

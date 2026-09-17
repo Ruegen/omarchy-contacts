@@ -62,7 +62,12 @@ Item {
   })
   readonly property var sync: svc && svc.sync ? svc.sync : ({})
   readonly property bool syncing: !!(sync && (sync.syncing || (sync.progress && sync.progress.phase && sync.progress.phase !== "idle" && sync.progress.phase !== "")))
-  readonly property string notice: svc ? String(svc.notice || svc.errorText || "") : ""
+  readonly property string notice: {
+    if (svc && svc.errorText) return String(svc.errorText)
+    if (sync && sync.progress && sync.progress.error) return String(sync.progress.error)
+    if (svc) return String(svc.notice || "")
+    return ""
+  }
   readonly property bool accountsColumnOpen: settingsOpen && selectedOption === "accounts"
   readonly property bool icloudPaneOpen: settingsOpen && selectedAccount === "icloud"
   readonly property var optionsItems: [
@@ -487,20 +492,65 @@ Item {
 
             Item { width: 1; height: 1 }
 
-            Text {
+            Row {
               anchors.verticalCenter: parent.verticalCenter
               visible: root.syncing
-              text: {
-                var p = root.sync && root.sync.progress ? root.sync.progress : ({})
-                var done = Number(p.done) || 0
-                var total = Number(p.total) || 0
-                var phase = String(p.phase || "sync")
-                return total > 0 ? ("Syncing " + phase + " " + done + "/" + total) : "Syncing…"
+              spacing: Style.space(8)
+
+              Item {
+                width: Style.space(14)
+                height: Style.space(14)
+                anchors.verticalCenter: parent.verticalCenter
+
+                Canvas {
+                  id: syncSpinner
+                  anchors.fill: parent
+                  antialiasing: true
+                  readonly property color stroke: root.accent
+                  onStrokeChanged: requestPaint()
+                  onPaint: {
+                    var ctx = getContext("2d")
+                    ctx.reset()
+                    var cx = width / 2
+                    var cy = height / 2
+                    var r = Math.max(1, Math.min(width, height) / 2 - 1.5)
+                    ctx.strokeStyle = root.accent
+                    ctx.lineWidth = 1.6
+                    ctx.lineCap = "round"
+                    ctx.beginPath()
+                    ctx.arc(cx, cy, r, -Math.PI * 0.5, Math.PI * 0.9)
+                    ctx.stroke()
+                  }
+                  onWidthChanged: requestPaint()
+                  onHeightChanged: requestPaint()
+                  Component.onCompleted: requestPaint()
+
+                  RotationAnimator on rotation {
+                    running: root.syncing
+                    from: 0
+                    to: 360
+                    duration: 2400
+                    loops: Animation.Infinite
+                  }
+                }
               }
-              textFormat: Text.PlainText
-              color: root.accent
-              font.family: Style.font.family
-              font.pixelSize: Style.font.body
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: {
+                  var p = root.sync && root.sync.progress ? root.sync.progress : ({})
+                  var done = Number(p.done) || 0
+                  var total = Number(p.total) || 0
+                  var phase = String(p.phase || "")
+                  if (total > 0) return (phase === "photos" ? "Photos " : "Syncing ") + done + "/" + total
+                  if (phase === "discover" || phase === "listing") return "Looking up iCloud…"
+                  return "Syncing…"
+                }
+                textFormat: Text.PlainText
+                color: root.accent
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+              }
             }
 
             Text {
