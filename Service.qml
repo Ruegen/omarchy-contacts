@@ -151,9 +151,10 @@ Item {
     })
   }
 
-  function get(uid) {
+  function get(uid, cb) {
     send("get", { uid: String(uid || "") }, function(res) {
       if (res && res.ok) root.current = res.contact
+      if (cb) cb(res)
     })
   }
 
@@ -191,6 +192,12 @@ Item {
     var fields = { path: String(path || "") }
     if (uids && uids.length) fields.uids = uids
     send(csv ? "export_csv" : "export_vcf", fields, cb)
+  }
+
+  function emailCard(uid, cb) {
+    send("email_card", { uid: String(uid || "") }, function(res) {
+      if (cb) cb(res)
+    })
   }
 
   function syncNow(cb) {

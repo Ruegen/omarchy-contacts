@@ -4,17 +4,19 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::contact::{Contact, Email, Phone};
+use crate::contact::{Address, Contact, Email, Link, Phone};
 use crate::csv_io;
 use crate::fsutil::{is_safe_name, open_nofollow_abs, atomic_write_abs};
 use crate::paths::{uid_file_name, Layout, MAX_IMPORT_BYTES, MAX_IPC_LINE, MAX_LOG_BYTES, MIN_SYNC_SECS};
 use crate::secrets;
 use crate::store::Store;
 use crate::sync::icloud::{interval, IcloudSync, SyncProgress};
+use crate::vcard::serialize_card;
 use crate::watch::DropWatch;
 
 pub struct Daemon {
@@ -66,6 +68,7 @@ impl Daemon {
             "export_vcf" => self.export_path(v, false),
             "import_csv" => self.import_path(v.get("path").and_then(|q| q.as_str()).unwrap_or(""), true),
             "export_csv" => self.export_path(v, true),
+            "email_card" => self.email_card(v.get("uid").and_then(|q| q.as_str()).unwrap_or("")),
             "sync_now" => self.sync_now(),
             "set_icloud" => self.set_icloud(v),
             "clear_icloud" => self.clear_icloud(),
@@ -172,6 +175,22 @@ impl Daemon {
         match write_user_file(path, &data) {
             Ok(()) => json!({"ok": true, "bytes": data.len()}),
             Err(e) => json!({"ok": false, "error": e.to_string()}),
+        }
+    }
+
+    fn email_card(&self, uid: &str) -> Value {
+        let Some(c) = self.store.get(uid) else {
+            return json!({"ok": false, "error": "not found"});
+        };
+        let name = export_file_name(c);
+        let text = serialize_card(c);
+        if let Err(e) = self.store.layout.runtime.atomic_write(&name, text.as_bytes()) {
+            return json!({"ok": false, "error": e.to_string()});
+        }
+        let path = self.store.layout.runtime_path.join(&name);
+        match mail_card_file(&path, &c.display_name()) {
+            Ok(()) => json!({"ok": true, "path": path.to_string_lossy()}),
+            Err(e) => json!({"ok": false, "error": e}),
         }
     }
 
@@ -520,6 +539,7 @@ fn contact_from_json(v: &Value) -> Result<Contact, String> {
         org: v.get("org").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         title: v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         note: v.get("note").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        bday: v.get("bday").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         ..Contact::default()
     };
     if let Some(arr) = v.get("phones").and_then(|x| x.as_array()) {
@@ -537,6 +557,49 @@ fn contact_from_json(v: &Value) -> Result<Contact, String> {
                 value: p.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             });
         }
+    }
+    if let Some(arr) = v.get("urls").and_then(|x| x.as_array()) {
+        for p in arr {
+            c.urls.push(Link {
+                type_: p.get("type").and_then(|x| x.as_str()).unwrap_or("other").to_string(),
+                value: p.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            });
+        }
+    }
+    if let Some(arr) = v.get("addresses").and_then(|x| x.as_array()) {
+        for p in arr {
+            c.addresses.push(Address {
+                type_: p.get("type").and_then(|x| x.as_str()).unwrap_or("other").to_string(),
+                street: p.get("street").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                city: p.get("city").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                region: p.get("region").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                postal: p.get("postal").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                country: p.get("country").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            });
+        }
+    }
+    if let Some(arr) = v.get("groups").and_then(|x| x.as_array()) {
+        for g in arr {
+            if let Some(s) = g.as_str() {
+                let s = s.trim();
+                if !s.is_empty() {
+                    c.groups.push(s.to_string());
+                }
+            }
+        }
+    }
+    if let Some(arr) = v.get("members").and_then(|x| x.as_array()) {
+        for m in arr {
+            if let Some(s) = m.as_str() {
+                let s = s.trim();
+                if !s.is_empty() {
+                    c.members.push(s.to_string());
+                }
+            }
+        }
+    }
+    if v.get("is_group").and_then(|x| x.as_bool()).unwrap_or(false) {
+        c.is_group = true;
     }
     if let Some(b64) = v.get("photo_b64").and_then(|x| x.as_str()) {
         if !b64.is_empty() {
@@ -556,5 +619,72 @@ fn contact_from_json(v: &Value) -> Result<Contact, String> {
     }
     c.normalize();
     Ok(c)
+}
+
+fn export_file_name(c: &Contact) -> String {
+    let raw = c.display_name();
+    let mut s = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            s.push(ch);
+        } else if ch == ' ' || ch == '-' {
+            if !s.ends_with('-') {
+                s.push('-');
+            }
+        }
+        if s.len() >= 60 {
+            break;
+        }
+    }
+    let s = s.trim_matches('-').to_string();
+    let file = format!("{}.vcf", if s.is_empty() { "contact".into() } else { s });
+    if is_safe_name(&file) {
+        file
+    } else {
+        "contact.vcf".into()
+    }
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' | '\r' => {}
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn mail_card_file(path: &Path, name: &str) -> Result<(), String> {
+    if !path.is_file() {
+        return Err("The card file could not be written.".into());
+    }
+    let path_json = json_string(&path.to_string_lossy());
+    let subject = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == ' ' || *c == '-')
+        .take(40)
+        .collect::<String>();
+    let payload = format!(
+        r#"{{"compose":true,"attachments":[{path_json}],"mailto":"mailto:?subject=Contact {subject}"}}"#
+    );
+    let summoned = Command::new("omarchy-shell")
+        .args(["shell", "summon", "omamail", &payload])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if summoned {
+        return Ok(());
+    }
+    Command::new("xdg-email")
+        .arg("--attach")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("Could not open mail with the card attached: {err}"))
 }
 

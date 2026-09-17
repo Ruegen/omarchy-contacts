@@ -9,7 +9,7 @@ use crate::sync::carddav::{
     pick_principal, vcards_in_multistatus, xml_hrefs, xml_shape, CardDavClient, DavResponse,
     ADDRESSBOOK_HOME, ADDRESSBOOK_INDEX, ADDRESSBOOK_LIST, ADDRESSBOOK_QUERY, CURRENT_USER_PRINCIPAL,
 };
-use crate::vcard::{parse_card, rev_newer};
+use crate::vcard::{parse_card, rev_newer, uid_core};
 
 const WELL_KNOWN: &str = "https://contacts.icloud.com/.well-known/carddav";
 
@@ -23,7 +23,7 @@ pub struct SyncProgress {
 
 pub struct IcloudSync {
     client: CardDavClient,
-    book: Option<String>,
+    books: Vec<String>,
 }
 
 impl IcloudSync {
@@ -36,7 +36,7 @@ impl IcloudSync {
         }
         Ok(Self {
             client: CardDavClient::new(apple_id.to_string(), password.to_string()),
-            book: None,
+            books: Vec::new(),
         })
     }
 
@@ -114,19 +114,30 @@ impl IcloudSync {
             )));
         }
         let list_xml = String::from_utf8_lossy(&list_res.body);
-        let book = addressbook_hrefs(&list_xml)
-            .into_iter()
-            .next()
-            .or_else(|| {
-                xml_hrefs(&list_xml)
-                    .into_iter()
-                    .find(|h| join_url(&home_url, h) != home_url && join_url(&home_url, h).trim_end_matches('/') != home_url.trim_end_matches('/'))
-            })
-            .ok_or_else(|| io::Error::other("no address book"))?;
-        let book_url = join_url(&list_res.url, &book);
-        let _ = writeln!(log, "{} book host={}", stamp(), host_only(&book_url));
-        self.book = Some(book_url.clone());
-        Ok(book_url)
+        let mut hrefs = addressbook_hrefs(&list_xml);
+        if hrefs.is_empty() {
+            if let Some(h) = xml_hrefs(&list_xml).into_iter().find(|h| {
+                join_url(&home_url, h) != home_url
+                    && join_url(&home_url, h).trim_end_matches('/') != home_url.trim_end_matches('/')
+            }) {
+                hrefs.push(h);
+            }
+        }
+        if hrefs.is_empty() {
+            return Err(io::Error::other("no address book"));
+        }
+        self.books = hrefs
+            .iter()
+            .map(|h| join_url(&list_res.url, h))
+            .collect();
+        let _ = writeln!(
+            log,
+            "{} book host={} n={}",
+            stamp(),
+            host_only(&self.books[0]),
+            self.books.len()
+        );
+        Ok(self.books[0].clone())
     }
 
     fn log_hop(&self, log: &mut impl Write, phase: &str, res: &DavResponse) -> io::Result<()> {
@@ -144,7 +155,7 @@ impl IcloudSync {
     }
 
     pub fn book_url(&mut self, log: &mut impl Write) -> io::Result<String> {
-        if let Some(b) = &self.book {
+        if let Some(b) = self.books.first() {
             return Ok(b.clone());
         }
         self.discover(log)
@@ -189,7 +200,14 @@ impl IcloudSync {
         log: &mut impl Write,
         mut progress: impl FnMut(SyncProgress, &Store),
     ) -> io::Result<SyncProgress> {
-        let book = self.book_url(log)?;
+        let _ = self.book_url(log)?;
+        let books = self.books.clone();
+        let mut remote_uids = std::collections::HashSet::new();
+        let mut pulled = 0u32;
+        let mut last_book = String::new();
+
+        for book in books {
+        last_book = book.clone();
         let _ = writeln!(log, "{} pull start host={}", stamp(), host_only(&book));
         progress(SyncProgress {
             phase: "listing".into(),
@@ -197,9 +215,6 @@ impl IcloudSync {
             total: 0,
             error: String::new(),
         }, store);
-
-        let mut remote_uids = std::collections::HashSet::new();
-        let mut pulled = 0u32;
 
         let query = self.client.report_at(&book, ADDRESSBOOK_QUERY);
         let bulk = match query {
@@ -331,22 +346,50 @@ impl IcloudSync {
                 }, store);
             }
         }
+        }
 
+        let book = last_book;
+        let remote_cores: std::collections::HashSet<String> = remote_uids
+            .iter()
+            .map(|u| uid_core(u))
+            .filter(|s| !s.is_empty())
+            .collect();
         let locals: Vec<Contact> = store
             .all()
             .into_iter()
-            .filter(|c| !remote_uids.contains(&c.uid))
+            .filter(|c| {
+                if remote_uids.contains(&c.uid) {
+                    return false;
+                }
+                let core = uid_core(&c.uid);
+                !( !core.is_empty() && remote_cores.contains(&core) )
+            })
             .cloned()
             .collect();
-        for c in locals {
-            let url = format!("{}/{}.vcf", book.trim_end_matches('/'), c.uid);
-            match self.client.put_card(&url, &c, None) {
-                Ok(_) => {
-                    let _ = writeln!(log, "{} push new uid={}", stamp(), log_uid(&c.uid));
+        if !locals.is_empty() {
+            let total = locals.len() as u32;
+            progress(SyncProgress {
+                phase: "upload".into(),
+                done: 0,
+                total,
+                error: String::new(),
+            }, store);
+            for (i, c) in locals.into_iter().enumerate() {
+                let url = format!("{}/{}.vcf", book.trim_end_matches('/'), c.uid);
+                match self.client.put_card(&url, &c, None) {
+                    Ok(_) => {
+                        let _ = writeln!(log, "{} push new uid={}", stamp(), log_uid(&c.uid));
+                    }
+                    Err(e) => {
+                        let _ = writeln!(log, "{} push new fail {}", stamp(), e);
+                    }
                 }
-                Err(e) => {
-                    let _ = writeln!(log, "{} push new fail {}", stamp(), e);
-                }
+                progress(SyncProgress {
+                    phase: "upload".into(),
+                    done: (i + 1) as u32,
+                    total,
+                    error: String::new(),
+                }, store);
             }
         }
         let _ = writeln!(log, "{} pull done n={pulled}", stamp());

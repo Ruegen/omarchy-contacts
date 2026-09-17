@@ -40,7 +40,22 @@ impl Store {
                             c.uid = name.trim_end_matches(".vcf").to_string();
                         }
                         c.normalize();
+                        let dirty = text.contains("&#") || text.contains("&amp;");
+                        if dirty {
+                            if self.write(&c).is_ok() {
+                                if let Ok(new_name) = uid_file_name(&c.uid) {
+                                    if new_name != name {
+                                        let _ = self.layout.contacts.unlink(&name);
+                                    }
+                                }
+                            }
+                        }
                         attach_photo_path(&self.layout, &mut c);
+                        if let Some(prev) = self.contacts.get(&c.uid) {
+                            if prev.has_photo && !c.has_photo {
+                                continue;
+                            }
+                        }
                         self.contacts.insert(c.uid.clone(), c);
                     }
                 }

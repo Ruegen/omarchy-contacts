@@ -15,6 +15,24 @@ pub struct Email {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Address {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub street: String,
+    pub city: String,
+    pub region: String,
+    pub postal: String,
+    pub country: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Link {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Contact {
     pub uid: String,
     pub first: String,
@@ -25,8 +43,20 @@ pub struct Contact {
     pub org: String,
     pub title: String,
     pub note: String,
+    #[serde(default)]
+    pub bday: String,
     pub phones: Vec<Phone>,
     pub emails: Vec<Email>,
+    #[serde(default)]
+    pub addresses: Vec<Address>,
+    #[serde(default)]
+    pub urls: Vec<Link>,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub members: Vec<String>,
+    #[serde(default)]
+    pub is_group: bool,
     pub rev: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub photo_jpeg: Option<Vec<u8>>,
@@ -53,6 +83,7 @@ impl Contact {
         self.org = self.org.trim().to_string();
         self.title = self.title.trim().to_string();
         self.note = self.note.trim().to_string();
+        self.bday = self.bday.trim().to_string();
         if self.fn_.trim().is_empty() {
             self.fn_ = self.display_name();
         } else {
@@ -60,6 +91,14 @@ impl Contact {
         }
         self.phones.retain(|p| !p.value.trim().is_empty());
         self.emails.retain(|e| !e.value.trim().is_empty());
+        self.urls.retain(|u| !u.value.trim().is_empty());
+        self.addresses.retain(|a| {
+            !a.street.trim().is_empty()
+                || !a.city.trim().is_empty()
+                || !a.region.trim().is_empty()
+                || !a.postal.trim().is_empty()
+                || !a.country.trim().is_empty()
+        });
         for p in &mut self.phones {
             p.value = p.value.trim().to_string();
             if p.type_.is_empty() {
@@ -111,6 +150,15 @@ impl Contact {
             "title": self.title,
             "phone": self.primary_phone(),
             "email": self.emails.first().map(|e| e.value.clone()).unwrap_or_default(),
+            "note": self.note,
+            "bday": self.bday,
+            "phones": self.phones,
+            "emails": self.emails,
+            "addresses": self.addresses,
+            "urls": self.urls,
+            "groups": self.groups,
+            "members": self.members,
+            "is_group": self.is_group,
             "has_photo": self.has_photo,
             "photo_file": self.photo_path.clone().unwrap_or_default(),
         })
@@ -129,10 +177,17 @@ impl Contact {
             "org": self.org,
             "title": self.title,
             "note": self.note,
+            "bday": self.bday,
             "phones": self.phones,
             "emails": self.emails,
+            "addresses": self.addresses,
+            "urls": self.urls,
+            "groups": self.groups,
+            "members": self.members,
+            "is_group": self.is_group,
             "rev": self.rev,
             "has_photo": self.has_photo,
+            "photo_file": self.photo_path.clone().unwrap_or_default(),
             "photo_b64": photo_b64,
         })
     }
@@ -149,6 +204,8 @@ impl Contact {
             self.nickname.clone(),
             self.org.clone(),
             self.title.clone(),
+            self.note.clone(),
+            self.bday.clone(),
         ];
         if hay.iter().any(|h| h.to_ascii_lowercase().contains(&q)) {
             return true;

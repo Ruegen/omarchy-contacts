@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import qs.Commons
 
 Rectangle {
@@ -10,7 +11,7 @@ Rectangle {
   property color dimColor: Color.muted
   property color accent: Color.accent
   property color background: Color.background
-  signal activated(string uid)
+  signal activated(int index)
   signal hovered(int index)
 
   color: "transparent"
@@ -26,11 +27,15 @@ Rectangle {
   ListView {
     id: list
     anchors.fill: parent
+    anchors.rightMargin: Style.space(4)
     model: root.contacts
     clip: true
     boundsBehavior: Flickable.StopAtBounds
     currentIndex: root.cursor
     spacing: Style.space(2)
+    ScrollBar.vertical: ScrollBar {
+      policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+    }
     delegate: Rectangle {
       required property var modelData
       required property int index
@@ -85,11 +90,8 @@ Rectangle {
 
       MouseArea {
         anchors.fill: parent
-        onClicked: {
-          root.cursor = index
-          root.activated(String(modelData.uid || ""))
-        }
-        onDoubleClicked: root.activated(String(modelData.uid || ""))
+        onClicked: root.activated(index)
+        onDoubleClicked: root.activated(index)
       }
     }
   }

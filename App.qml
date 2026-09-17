@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -48,10 +49,16 @@ Item {
   property string setupError: ""
   property var draft: ({})
   property int cursor: 0
+  property var selected: null
   property string searchText: ""
+  property string groupFilter: ""
+  property bool namingGroup: false
+  property string newGroupDraft: ""
   readonly property string passwordMask: "••••••••••••••••"
 
-  readonly property var contacts: svc && svc.contacts ? svc.contacts : []
+  readonly property var allContacts: svc && svc.contacts ? svc.contacts : []
+  readonly property var groupNames: collectGroupNames(allContacts)
+  readonly property var contacts: filterContacts(allContacts, searchText, groupFilter)
   readonly property var current: svc ? svc.current : null
   readonly property var keys: Keymap.merge(svc && svc.keys ? svc.keys : {})
   readonly property string keyContext: Keymap.contextFor({
@@ -105,9 +112,45 @@ Item {
     return String(contacts[cursor].uid || "")
   }
 
+  function rowAsDetail(row) {
+    if (!row) return null
+    var phone = String(row.phone || "")
+    var email = String(row.email || "")
+    return {
+      uid: String(row.uid || ""),
+      fn: String(row.fn || ""),
+      first: String(row.first || ""),
+      last: String(row.last || ""),
+      nickname: String(row.nickname || ""),
+      org: String(row.org || ""),
+      title: String(row.title || ""),
+      note: String(row.note || ""),
+      bday: String(row.bday || ""),
+      has_photo: !!row.has_photo,
+      photo_file: String(row.photo_file || ""),
+      photo_b64: row.photo_b64 ? String(row.photo_b64) : "",
+      phones: Array.isArray(row.phones) ? row.phones : (phone ? [{ type: "other", value: phone }] : []),
+      emails: Array.isArray(row.emails) ? row.emails : (email ? [{ type: "other", value: email }] : []),
+      addresses: Array.isArray(row.addresses) ? row.addresses : [],
+      urls: Array.isArray(row.urls) ? row.urls : []
+    }
+  }
+
   function selectCurrent() {
-    var uid = selectedUid()
-    if (uid && svc && typeof svc.get === "function") svc.get(uid)
+    if (!contacts.length || cursor < 0 || cursor >= contacts.length) {
+      selected = null
+      return
+    }
+    var row = contacts[cursor]
+    var uid = String(row && row.uid ? row.uid : "")
+    if (!selected || String(selected.uid || "") !== uid)
+      selected = rowAsDetail(row)
+    if (!uid || !svc || typeof svc.get !== "function") return
+    svc.get(uid, function(res) {
+      if (!res || !res.ok || !res.contact) return
+      if (String(res.contact.uid || "") !== String(root.selectedUid())) return
+      selected = rowAsDetail(res.contact)
+    })
   }
 
   function moveCursor(dy) {
@@ -227,10 +270,10 @@ Item {
   }
 
   function startEdit() {
-    if (!current) selectCurrent()
-    if (!svc || !svc.current) return
+    if (!selected) selectCurrent()
+    if (!selected) return
     editing = true
-    draft = Object.assign({}, svc.current)
+    draft = Object.assign({}, selected)
     Qt.callLater(function() { if (editor) editor.takeFocus() })
   }
 
@@ -280,9 +323,81 @@ Item {
     })
   }
 
+  function collectGroupNames(list) {
+    var seen = ({})
+    var out = []
+    if (!list || !list.length) return out
+    for (var i = 0; i < list.length; i++) {
+      var c = list[i]
+      if (c && c.is_group && c.fn) {
+        var n = String(c.fn)
+        if (n && !seen[n]) { seen[n] = true; out.push(n) }
+      }
+      var gs = c && c.groups ? c.groups : []
+      for (var j = 0; j < gs.length; j++) {
+        var g = String(gs[j] || "").trim()
+        if (g && !seen[g]) { seen[g] = true; out.push(g) }
+      }
+    }
+    out.sort()
+    return out
+  }
+
+  function uidKey(uid) {
+    return String(uid || "").toLowerCase().replace(/urn:uuid:/g, "").replace(/[^a-f0-9]/g, "")
+  }
+
+  function contactInGroup(c, name, list) {
+    if (!c || !name) return true
+    var gs = c.groups || []
+    for (var i = 0; i < gs.length; i++) {
+      if (String(gs[i]) === name) return true
+    }
+    var key = uidKey(c.uid)
+    for (var j = 0; j < list.length; j++) {
+      var g = list[j]
+      if (!g || !g.is_group || String(g.fn) !== name) continue
+      var ms = g.members || []
+      for (var k = 0; k < ms.length; k++) {
+        var mk = uidKey(ms[k])
+        if (mk && key && (mk === key || key.indexOf(mk) >= 0 || mk.indexOf(key) >= 0)) return true
+      }
+    }
+    return false
+  }
+
+  function filterContacts(list, q, group) {
+    if (!list || !list.length) return []
+    var needle = String(q || "").trim().toLowerCase()
+    var groupName = String(group || "")
+    var out = []
+    for (var i = 0; i < list.length; i++) {
+      var c = list[i]
+      if (c && c.is_group) continue
+      if (groupName && !contactInGroup(c, groupName, list)) continue
+      if (!needle) {
+        out.push(c)
+        continue
+      }
+      var hay = [
+        c.fn, c.first, c.last, c.nickname, c.org, c.title, c.phone, c.email, c.note, c.bday
+      ]
+      var hit = false
+      for (var j = 0; j < hay.length; j++) {
+        if (String(hay[j] || "").toLowerCase().indexOf(needle) !== -1) {
+          hit = true
+          break
+        }
+      }
+      if (hit) out.push(c)
+    }
+    return out
+  }
+
   function applySearch() {
-    if (svc && typeof svc.list === "function") svc.list(searchText)
     cursor = 0
+    if (contacts.length) selectCurrent()
+    else selected = null
   }
 
   function pickImport(csv) {
@@ -296,9 +411,91 @@ Item {
   function pickExport(csv) {
     picker.csv = !!csv
     picker.save = true
+    picker.uids = []
     picker.command = ["/usr/bin/zenity", "--file-selection", "--save", "--confirm-overwrite",
       "--filename=" + (csv ? "contacts.csv" : "contacts.vcf")]
     picker.running = true
+  }
+
+  function pickExportSelected() {
+    var uid = selectedUid()
+    if (!uid) return
+    var raw = selected && selected.fn ? String(selected.fn) : "contact"
+    var name = raw.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "")
+    if (!name) name = "contact"
+    picker.csv = false
+    picker.save = true
+    picker.uids = [uid]
+    picker.command = ["/usr/bin/zenity", "--file-selection", "--save", "--confirm-overwrite",
+      "--filename=" + name + ".vcf"]
+    picker.running = true
+  }
+
+  function emailSelected() {
+    var uid = selectedUid()
+    if (!uid || !svc || typeof svc.emailCard !== "function") return
+    svc.emailCard(uid, function(res) {
+      if (res && res.ok) return
+      if (svc) svc.errorText = svc.plain(res && res.error ? res.error : "Could not open mail with this card")
+    })
+  }
+
+  function startNewGroup() {
+    namingGroup = true
+    newGroupDraft = ""
+    Qt.callLater(function() {
+      if (!groupNameField) return
+      groupNameField.text = ""
+      groupNameField.forceActiveFocus()
+    })
+  }
+
+  function createGroup() {
+    var name = String(newGroupDraft || "").trim()
+    if (!name || !svc) return
+    var existing = groupNames
+    for (var i = 0; i < existing.length; i++) {
+      if (String(existing[i]).toLowerCase() === name.toLowerCase()) {
+        groupFilter = existing[i]
+        namingGroup = false
+        newGroupDraft = ""
+        cursor = 0
+        selectCurrent()
+        return
+      }
+    }
+    var uid = selectedUid()
+    var members = uid ? [uid] : []
+    svc.save({
+      fn: name,
+      first: "",
+      last: "",
+      is_group: true,
+      members: members,
+      phones: [],
+      emails: []
+    }, function(res) {
+      if (!res || !res.ok) return
+      function finish() {
+        namingGroup = false
+        newGroupDraft = ""
+        groupFilter = name
+        cursor = 0
+        if (svc) svc.list("")
+        Qt.callLater(root.selectCurrent)
+      }
+      if (uid && selected) {
+        var gs = []
+        var cur = selected.groups || []
+        for (var j = 0; j < cur.length; j++) gs.push(String(cur[j]))
+        if (gs.indexOf(name) < 0) gs.push(name)
+        var person = Object.assign({}, selected)
+        person.groups = gs
+        svc.save(person, function() { finish() })
+      } else {
+        finish()
+      }
+    })
   }
 
   function handleDrop(urls) {
@@ -325,9 +522,16 @@ Item {
       if (confirmDelete) { confirmDelete = false; event.accepted = true; return }
       if (editing) { editing = false; event.accepted = true; return }
       if (settingsOpen) { settingsBack(); event.accepted = true; return }
+      if (namingGroup) {
+        namingGroup = false
+        newGroupDraft = ""
+        event.accepted = true
+        return
+      }
       if (searchFocused) {
         searchFocused = false
         searchText = ""
+        if (searchField && searchField.text) searchField.text = ""
         applySearch()
         event.accepted = true
         return
@@ -394,19 +598,27 @@ Item {
 
   onContactsChanged: {
     if (cursor >= contacts.length) cursor = Math.max(0, contacts.length - 1)
+    if (!contacts.length) {
+      selected = null
+      return
+    }
+    if (selected && String(selected.uid || "") === selectedUid()) return
+    selectCurrent()
   }
 
   Process {
     id: picker
     property bool csv: false
     property bool save: false
+    property var uids: []
     stdout: SplitParser {
       splitMarker: "\n"
       onRead: function(data) {
         var path = String(data || "").replace(/\r/g, "").trim()
         if (!path || path.length > 4096) return
         if (picker.save) {
-          if (root.svc) root.svc.exportFile(path, [], picker.csv, function() {})
+          if (root.svc) root.svc.exportFile(path, picker.uids, picker.csv, function() {})
+          picker.uids = []
         } else {
           if (root.svc) root.svc.importFile(path, picker.csv, function() {})
         }
@@ -482,9 +694,9 @@ Item {
               anchors.verticalCenter: parent.verticalCenter
               width: Style.space(240)
               placeholderText: "Search"
-              text: root.searchText
               onActiveFocusChanged: root.searchFocused = activeFocus
               onTextChanged: {
+                if (root.searchText === text) return
                 root.searchText = text
                 root.applySearch()
               }
@@ -542,7 +754,11 @@ Item {
                   var done = Number(p.done) || 0
                   var total = Number(p.total) || 0
                   var phase = String(p.phase || "")
-                  if (total > 0) return (phase === "photos" ? "Photos " : "Syncing ") + done + "/" + total
+                    if (total > 0) {
+                    if (phase === "photos") return "Photos " + done + "/" + total
+                    if (phase === "upload") return "Sending " + done + "/" + total
+                    return "Syncing " + done + "/" + total
+                  }
                   if (phase === "discover" || phase === "listing") return "Looking up iCloud…"
                   return "Syncing…"
                 }
@@ -582,33 +798,141 @@ Item {
             width: Style.space(280)
             height: parent.height
             color: root.background
+            clip: true
 
-            ContactList {
-              id: list
+            Column {
+              id: leftColumn
+              visible: !root.settingsOpen
               anchors.fill: parent
               anchors.margins: Style.space(8)
-              contacts: root.contacts
-              cursor: root.cursor
-              textColor: root.foreground
-              dimColor: root.dim
-              accent: root.accent
-              background: root.background
-              visible: !root.settingsOpen && root.contacts.length > 0 && !(root.svc && root.svc.daemonMissing)
-              onActivated: function(uid) {
-                for (var i = 0; i < root.contacts.length; i++) {
-                  if (String(root.contacts[i].uid) === uid) root.cursor = i
-                }
-                root.selectCurrent()
-              }
-            }
+              spacing: Style.space(8)
 
-            EmptyState {
-              anchors.fill: parent
-              visible: !root.settingsOpen && root.contacts.length === 0 && !(root.svc && root.svc.daemonMissing)
-              textColor: root.foreground
-              dimColor: root.dim
-              title: "No contacts yet"
-              body: "Press n to add someone, or drop a vCard on this window."
+              Item {
+                id: groupArea
+                width: parent.width
+                height: Math.min(groupFlick.contentHeight, Style.space(108))
+
+                Flickable {
+                  id: groupFlick
+                  anchors.fill: parent
+                  clip: true
+                  boundsBehavior: Flickable.StopAtBounds
+                  flickableDirection: Flickable.VerticalFlick
+                  contentWidth: width
+                  contentHeight: groupFlow.implicitHeight
+                  ScrollBar.vertical: ScrollBar {
+                    policy: groupFlick.contentHeight > groupFlick.height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                  }
+
+                  Flow {
+                    id: groupFlow
+                    width: groupFlick.width - Style.space(8)
+                    spacing: Style.space(6)
+
+                    Repeater {
+                      model: ["All"].concat(root.groupNames)
+                      delegate: Rectangle {
+                        required property var modelData
+                        height: Style.space(28)
+                        width: Math.min(groupFlow.width, chipLabel.implicitWidth + Style.space(16))
+                        radius: height / 2
+                        color: {
+                          var label = String(modelData)
+                          var active = (label === "All" && !root.groupFilter) || label === root.groupFilter
+                          return active
+                            ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.22)
+                            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+                        }
+                        border.width: Style.normalBorderWidth
+                        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
+                        Text {
+                          id: chipLabel
+                          anchors.centerIn: parent
+                          width: parent.width - Style.space(12)
+                          horizontalAlignment: Text.AlignHCenter
+                          elide: Text.ElideRight
+                          text: String(modelData)
+                          textFormat: Text.PlainText
+                          color: root.foreground
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.body
+                        }
+                        MouseArea {
+                          anchors.fill: parent
+                          onClicked: {
+                            var label = String(modelData)
+                            root.groupFilter = label === "All" ? "" : label
+                            root.cursor = 0
+                            root.selectCurrent()
+                          }
+                        }
+                      }
+                    }
+
+                    Rectangle {
+                      visible: !root.namingGroup
+                      height: Style.space(28)
+                      width: addLabel.implicitWidth + Style.space(16)
+                      radius: height / 2
+                      color: "transparent"
+                      border.width: Style.normalBorderWidth
+                      border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.45)
+                      Text {
+                        id: addLabel
+                        anchors.centerIn: parent
+                        text: "+ Group"
+                        textFormat: Text.PlainText
+                        color: root.accent
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                      }
+                      MouseArea {
+                        anchors.fill: parent
+                        onClicked: root.startNewGroup()
+                      }
+                    }
+
+                    TextField {
+                      id: groupNameField
+                      visible: root.namingGroup
+                      width: Math.max(Style.space(120), groupFlow.width * 0.62)
+                      placeholderText: "Group name"
+                      onTextChanged: root.newGroupDraft = text
+                      onAccepted: root.createGroup()
+                    }
+                  }
+                }
+              }
+
+              Item {
+                width: parent.width
+                height: Math.max(Style.space(80), leftColumn.height - groupArea.height - leftColumn.spacing)
+
+                ContactList {
+                  id: list
+                  anchors.fill: parent
+                  contacts: root.contacts
+                  cursor: root.cursor
+                  textColor: root.foreground
+                  dimColor: root.dim
+                  accent: root.accent
+                  background: root.background
+                  visible: root.contacts.length > 0 && !(root.svc && root.svc.daemonMissing)
+                  onActivated: function(index) {
+                    root.cursor = index
+                    root.selectCurrent()
+                  }
+                }
+
+                EmptyState {
+                  anchors.fill: parent
+                  visible: root.contacts.length === 0 && !(root.svc && root.svc.daemonMissing)
+                  textColor: root.foreground
+                  dimColor: root.dim
+                  title: "No contacts yet"
+                  body: "Press n to add someone, or drop a vCard on this window."
+                }
+              }
             }
 
             EmptyState {
@@ -794,19 +1118,21 @@ Item {
 
             ContactDetail {
               anchors.fill: parent
-              visible: !root.editing && !root.settingsOpen && !!root.current
-              contact: root.current
+              visible: !root.editing && !root.settingsOpen && !!root.selected
+              contact: root.selected
               textColor: root.foreground
               dimColor: root.dim
               accent: root.accent
               background: root.background
               onEditRequested: root.startEdit()
               onDeleteRequested: root.confirmDelete = true
+              onExportRequested: root.pickExportSelected()
+              onEmailRequested: root.emailSelected()
             }
 
             EmptyState {
               anchors.fill: parent
-              visible: !root.editing && !root.settingsOpen && !root.current
+              visible: !root.editing && !root.settingsOpen && !root.selected
               textColor: root.foreground
               dimColor: root.dim
               title: "Select a contact"

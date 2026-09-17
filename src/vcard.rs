@@ -1,6 +1,6 @@
 //! vCard 3.0 / 4.0 subset used by the address book.
 
-use crate::contact::{Contact, Email, Phone};
+use crate::contact::{Address, Contact, Email, Link, Phone};
 use crate::paths::MAX_PHOTO_BYTES;
 
 #[derive(Debug)]
@@ -40,7 +40,7 @@ pub fn split_cards(input: &str) -> Vec<String> {
 }
 
 pub fn parse_card(text: &str) -> Result<Contact, ParseError> {
-    let unfolded = unfold(text);
+    let unfolded = unfold(&decode_markup(text));
     let mut c = Contact::default();
     for line in unfolded.lines() {
         if line.is_empty() {
@@ -63,6 +63,7 @@ pub fn parse_card(text: &str) -> Result<Contact, ParseError> {
             "ORG" => c.org = unescape(&value).split(';').next().unwrap_or("").to_string(),
             "TITLE" => c.title = unescape(&value),
             "NOTE" => c.note = decode_note(&params, &value),
+            "BDAY" => c.bday = unescape(&value),
             "REV" => c.rev = unescape(&value),
             "TEL" => {
                 let v = normalize_tel(&unescape(&value));
@@ -80,6 +81,40 @@ pub fn parse_card(text: &str) -> Result<Contact, ParseError> {
                         type_: email_type(&params),
                         value: v,
                     });
+                }
+            }
+            "ADR" => {
+                if let Some(addr) = parse_adr(&params, &value) {
+                    c.addresses.push(addr);
+                }
+            }
+            "URL" => {
+                let v = unescape(&value);
+                if !v.is_empty() {
+                    c.urls.push(Link {
+                        type_: url_type(&params),
+                        value: v,
+                    });
+                }
+            }
+            "CATEGORIES" => {
+                for part in unescape(&value).split(',') {
+                    let g = part.trim();
+                    if !g.is_empty() && !c.groups.iter().any(|x| x.eq_ignore_ascii_case(g)) {
+                        c.groups.push(g.to_string());
+                    }
+                }
+            }
+            "KIND" | "X-ADDRESSBOOKSERVER-KIND" => {
+                if unescape(&value).eq_ignore_ascii_case("group") {
+                    c.is_group = true;
+                }
+            }
+            "MEMBER" | "X-ADDRESSBOOKSERVER-MEMBER" => {
+                let m = member_uid(&unescape(&value));
+                if !m.is_empty() {
+                    c.members.push(m);
+                    c.is_group = true;
                 }
             }
             "PHOTO" => c.photo_jpeg = parse_photo(&params, &value),
@@ -126,6 +161,40 @@ pub fn serialize_card(c: &Contact) -> String {
     }
     if !c.note.is_empty() {
         push_prop(&mut out, "NOTE", &c.note);
+    }
+    if !c.bday.is_empty() {
+        push_prop(&mut out, "BDAY", &c.bday);
+    }
+    for a in &c.addresses {
+        out.push_str("ADR;TYPE=");
+        out.push_str(&escape_param(&a.type_));
+        out.push_str(":;;");
+        out.push_str(&escape(&a.street));
+        out.push(';');
+        out.push_str(&escape(&a.city));
+        out.push(';');
+        out.push_str(&escape(&a.region));
+        out.push(';');
+        out.push_str(&escape(&a.postal));
+        out.push(';');
+        out.push_str(&escape(&a.country));
+        out.push_str("\r\n");
+    }
+    for u in &c.urls {
+        out.push_str("URL;TYPE=");
+        out.push_str(&escape_param(&u.type_));
+        out.push(':');
+        out.push_str(&escape(&u.value));
+        out.push_str("\r\n");
+    }
+    if !c.groups.is_empty() {
+        push_prop(&mut out, "CATEGORIES", &c.groups.join(","));
+    }
+    if c.is_group {
+        push_prop(&mut out, "X-ADDRESSBOOKSERVER-KIND", "group");
+        for m in &c.members {
+            push_prop(&mut out, "X-ADDRESSBOOKSERVER-MEMBER", &format!("urn:uuid:{m}"));
+        }
     }
     if let Some(photo) = &c.photo_jpeg {
         if photo.len() <= MAX_PHOTO_BYTES {
@@ -191,6 +260,136 @@ fn strip_group(name: &str) -> &str {
         Some(i) => &name[i + 1..],
         None => name,
     }
+}
+
+fn member_uid(v: &str) -> String {
+    let v = v.trim();
+    let v = v
+        .strip_prefix("urn:uuid:")
+        .or_else(|| v.strip_prefix("URN:UUID:"))
+        .unwrap_or(v)
+        .trim();
+    v.trim_end_matches('/').to_string()
+}
+
+pub fn decode_markup(s: &str) -> String {
+    let mut cur = s.to_string();
+    for _ in 0..6 {
+        let next = decode_markup_once(&cur);
+        if next == cur {
+            break;
+        }
+        cur = next;
+    }
+    cur
+}
+
+pub fn uid_core(uid: &str) -> String {
+    let s = decode_markup(uid);
+    let s = s
+        .strip_prefix("urn:uuid:")
+        .or_else(|| s.strip_prefix("URN:UUID:"))
+        .unwrap_or(&s);
+    let head = s.split('/').next().unwrap_or(s);
+    head.chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+pub fn photo_uri(text: &str) -> Option<String> {
+    let unfolded = unfold(&decode_markup(text));
+    for line in unfolded.lines() {
+        let Some((name, params, value)) = split_prop(line) else {
+            continue;
+        };
+        if !strip_group(&name).eq_ignore_ascii_case("PHOTO") {
+            continue;
+        }
+        let v = value.trim();
+        let upper = params.to_ascii_uppercase();
+        if v.starts_with("https://") || v.starts_with("http://") {
+            return Some(v.to_string());
+        }
+        if upper.contains("VALUE=URI") && v.starts_with("https://") {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+fn decode_markup_once(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '&' {
+            if c != '\r' {
+                out.push(c);
+            }
+            continue;
+        }
+        let mut ent = String::from("&");
+        while let Some(&n) = chars.peek() {
+            chars.next();
+            if n == '\\' {
+                if matches!(chars.peek(), Some(';')) {
+                    chars.next();
+                    ent.push(';');
+                    break;
+                }
+                ent.push(n);
+                if ent.len() > 16 {
+                    break;
+                }
+                continue;
+            }
+            ent.push(n);
+            if n == ';' || ent.len() > 16 {
+                break;
+            }
+        }
+        if !ent.ends_with(';') {
+            if let Some(ch) = numeric_entity(&format!("{ent};")) {
+                if ch != '\r' {
+                    out.push(ch);
+                }
+                continue;
+            }
+            out.push_str(&ent);
+            continue;
+        }
+        let decoded = match ent.as_str() {
+            "&amp;" => Some('&'),
+            "&lt;" => Some('<'),
+            "&gt;" => Some('>'),
+            "&quot;" => Some('"'),
+            "&apos;" => Some('\''),
+            _ => numeric_entity(&ent),
+        };
+        if let Some(ch) = decoded {
+            if ch != '\r' {
+                out.push(ch);
+            }
+        } else {
+            out.push_str(&ent);
+        }
+    }
+    out
+}
+
+fn numeric_entity(ent: &str) -> Option<char> {
+    let body = ent
+        .trim_start_matches('&')
+        .trim_end_matches(';')
+        .replace('\\', "");
+    let num = if let Some(hex) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
+        u32::from_str_radix(hex, 16).ok()?
+    } else if let Some(dec) = body.strip_prefix('#') {
+        dec.parse::<u32>().ok()?
+    } else {
+        return None;
+    };
+    char::from_u32(num)
 }
 
 fn unescape(v: &str) -> String {
@@ -299,6 +498,58 @@ fn email_type(params: &str) -> String {
         }
     }
     "other".into()
+}
+
+fn url_type(params: &str) -> String {
+    let types = param_types(params);
+    for want in ["work", "home", "pref"] {
+        if types.iter().any(|t| t == want) {
+            return if want == "pref" {
+                "other".into()
+            } else {
+                want.into()
+            };
+        }
+    }
+    "other".into()
+}
+
+fn parse_adr(params: &str, value: &str) -> Option<Address> {
+    let parts: Vec<String> = value.split(';').map(unescape).collect();
+    let street = [parts.get(1), parts.get(2)]
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let addr = Address {
+        type_: {
+            let types = param_types(params);
+            if types.iter().any(|t| t == "work") {
+                "work".into()
+            } else if types.iter().any(|t| t == "home") {
+                "home".into()
+            } else {
+                "other".into()
+            }
+        },
+        street,
+        city: parts.get(3).cloned().unwrap_or_default(),
+        region: parts.get(4).cloned().unwrap_or_default(),
+        postal: parts.get(5).cloned().unwrap_or_default(),
+        country: parts.get(6).cloned().unwrap_or_default(),
+    };
+    if addr.street.is_empty()
+        && addr.city.is_empty()
+        && addr.region.is_empty()
+        && addr.postal.is_empty()
+        && addr.country.is_empty()
+    {
+        None
+    } else {
+        Some(addr)
+    }
 }
 
 fn decode_note(params: &str, value: &str) -> String {
@@ -415,6 +666,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(leftover.phones[0].value, "+61411112222");
+        let extra = parse_card(
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:n1\r\nFN:Ada\r\nNOTE:Water heating inspection guy\r\nADR;TYPE=HOME:;;10 Main St;Melbourne;VIC;3000;Australia\r\nURL;TYPE=WORK:https://example.com\r\nBDAY:1990-01-02\r\nTEL;TYPE=CELL:0411\r\nTEL;TYPE=WORK:0399\r\nEND:VCARD\r\n",
+        )
+        .unwrap();
+        assert_eq!(extra.note, "Water heating inspection guy");
+        assert_eq!(extra.phones.len(), 2);
+        assert_eq!(extra.addresses[0].city, "Melbourne");
+        assert_eq!(extra.urls[0].value, "https://example.com");
+        assert_eq!(extra.bday, "1990-01-02");
+        let group = parse_card(
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:g1\r\nFN:Family\r\nX-ADDRESSBOOKSERVER-KIND:group\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:6F5812EB-AA85-4B89-AACC-D59A07D4F262\r\nEND:VCARD\r\n",
+        )
+        .unwrap();
+        assert!(group.is_group);
+        assert_eq!(group.fn_, "Family");
+        assert_eq!(group.members[0], "6F5812EB-AA85-4B89-AACC-D59A07D4F262");
+        let apple = parse_card(
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:6F5812EB-AA85-4B89-AACC-D59A07D4F262&#13\\;\r\nFN:Tom &amp; Jerry&#13\\;\r\nTEL;TYPE=other:+61 431 034 583&#13\\;\r\nREV:2024-01-14T13:55:36Z&#13\\;\r\nEND:VCARD\r\n",
+        )
+        .unwrap();
+        assert_eq!(apple.uid, "6F5812EB-AA85-4B89-AACC-D59A07D4F262");
+        assert_eq!(apple.fn_, "Tom & Jerry");
+        assert_eq!(apple.phones[0].value, "+61 431 034 583");
+        assert!(!apple.uid.contains('&'));
+        assert!(!apple.phones[0].value.contains('&'));
+        assert_eq!(
+            uid_core("6F5812EB-AA85-4B89-AACC-D59A07D4F262&#13;"),
+            uid_core("6F5812EB-AA85-4B89-AACC-D59A07D4F262/ABPerson")
+        );
     }
 
     #[test]

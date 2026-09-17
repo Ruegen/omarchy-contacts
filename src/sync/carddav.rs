@@ -7,7 +7,7 @@ use reqwest::redirect::Policy;
 use reqwest::Method;
 
 use crate::contact::Contact;
-use crate::vcard::{parse_card, serialize_card, split_cards};
+use crate::vcard::{decode_markup, parse_card, photo_uri, serialize_card, split_cards};
 
 pub const MAX_BODY: usize = 2 * 1024 * 1024;
 pub const MAX_PROPFIND: usize = 32 * 1024 * 1024;
@@ -201,12 +201,34 @@ impl CardDavClient {
             .into_iter()
             .next()
             .ok_or_else(|| io::Error::other("empty vcard"))?;
-        let contact = parse_card(&card).map_err(|e| io::Error::other(e.0))?;
+        let mut contact = parse_card(&card).map_err(|e| io::Error::other(e.0))?;
+        if contact.photo_jpeg.is_none() {
+            if let Some(uri) = photo_uri(&card) {
+                if let Ok(bytes) = self.get_bytes(&uri) {
+                    if bytes.len() >= 32
+                        && bytes.len() <= crate::paths::MAX_PHOTO_BYTES
+                        && bytes[0] == 0xFF
+                        && bytes[1] == 0xD8
+                    {
+                        contact.photo_jpeg = Some(bytes);
+                        contact.has_photo = true;
+                    }
+                }
+            }
+        }
         Ok(RemoteCard {
             href: url.to_string(),
             etag,
             contact,
         })
+    }
+
+    pub fn get_bytes(&self, url: &str) -> io::Result<Vec<u8>> {
+        let (status, _, body) = self.request("GET", url, None, None, None, &[])?;
+        if status != 200 {
+            return Err(io::Error::other(format!("get {status}")));
+        }
+        Ok(body)
     }
 
     pub fn delete(&self, url: &str, etag: Option<&str>) -> io::Result<()> {
@@ -284,7 +306,7 @@ pub fn xml_tag_values(xml: &str, tag: &str) -> Vec<String> {
         let start = rel.end;
         if let Some(end) = find_close(&lower, start, tag) {
             let raw = xml.get(start..end).unwrap_or("");
-            let v = decode_xml(raw.trim());
+            let v = decode_markup(raw.trim());
             if !v.is_empty() {
                 out.push(v);
             }
@@ -476,57 +498,6 @@ pub fn vcards_in_multistatus(xml: &str) -> Vec<(String, String)> {
     out
 }
 
-fn decode_xml(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '&' {
-            out.push(c);
-            continue;
-        }
-        let mut ent = String::from("&");
-        while let Some(&n) = chars.peek() {
-            ent.push(n);
-            chars.next();
-            if n == ';' || ent.len() > 12 {
-                break;
-            }
-        }
-        if !ent.ends_with(';') {
-            out.push_str(&ent);
-            continue;
-        }
-        let decoded = match ent.as_str() {
-            "&amp;" => Some('&'),
-            "&lt;" => Some('<'),
-            "&gt;" => Some('>'),
-            "&quot;" => Some('"'),
-            "&apos;" => Some('\''),
-            _ => numeric_entity(&ent),
-        };
-        if let Some(ch) = decoded {
-            if ch != '\r' {
-                out.push(ch);
-            }
-        } else {
-            out.push_str(&ent);
-        }
-    }
-    out
-}
-
-fn numeric_entity(ent: &str) -> Option<char> {
-    let body = ent.trim_start_matches('&').trim_end_matches(';');
-    let num = if let Some(hex) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
-        u32::from_str_radix(hex, 16).ok()?
-    } else if let Some(dec) = body.strip_prefix('#') {
-        dec.parse::<u32>().ok()?
-    } else {
-        return None;
-    };
-    char::from_u32(num)
-}
-
 pub fn join_url(base: &str, href: &str) -> String {
     if href.starts_with("https://") {
         href.to_string()
@@ -638,6 +609,8 @@ END:VCARD</address-data></response>"#;
         assert!(cards[0].1.contains("Tom & Jerry"));
         assert!(cards[0].1.contains("+61411112222"));
         assert!(!cards[0].1.contains("&#"));
+        let escaped = "<href>Tom&#13\\;</href>";
+        assert_eq!(xml_hrefs(escaped)[0], "Tom");
     }
 
     #[test]
