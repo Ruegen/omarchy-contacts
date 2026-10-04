@@ -11,6 +11,7 @@ Rectangle {
   property color dimColor: Color.muted
   property color accent: Color.accent
   property color background: Color.background
+  property bool focused: false
   signal activated(int index)
   signal hovered(int index)
 
@@ -24,9 +25,18 @@ Rectangle {
 
   onCursorChanged: ensureVisible()
 
+  Rectangle {
+    visible: root.focused
+    anchors.left: parent.left
+    width: 2
+    height: parent.height
+    color: root.accent
+  }
+
   ListView {
     id: list
     anchors.fill: parent
+    anchors.leftMargin: root.focused ? Style.space(6) : 0
     anchors.rightMargin: Style.space(4)
     model: root.contacts
     clip: true

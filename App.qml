@@ -54,10 +54,14 @@ Item {
   property string groupFilter: ""
   property bool namingGroup: false
   property string newGroupDraft: ""
+  property string pane: "list"
+  property int groupCursor: 0
+  property bool myCardActive: false
   readonly property string passwordMask: "••••••••••••••••"
 
   readonly property var allContacts: svc && svc.contacts ? svc.contacts : []
   readonly property var groupNames: collectGroupNames(allContacts)
+  readonly property var groupItems: ["All"].concat(groupNames)
   readonly property var contacts: filterContacts(allContacts, searchText, groupFilter)
   readonly property var current: svc ? svc.current : null
   readonly property var keys: Keymap.merge(svc && svc.keys ? svc.keys : {})
@@ -116,24 +120,140 @@ Item {
     if (!row) return null
     var phone = String(row.phone || "")
     var email = String(row.email || "")
-    return {
-      uid: String(row.uid || ""),
-      fn: String(row.fn || ""),
-      first: String(row.first || ""),
-      last: String(row.last || ""),
-      nickname: String(row.nickname || ""),
-      org: String(row.org || ""),
-      title: String(row.title || ""),
-      note: String(row.note || ""),
-      bday: String(row.bday || ""),
-      has_photo: !!row.has_photo,
-      photo_file: String(row.photo_file || ""),
-      photo_b64: row.photo_b64 ? String(row.photo_b64) : "",
-      phones: Array.isArray(row.phones) ? row.phones : (phone ? [{ type: "other", value: phone }] : []),
-      emails: Array.isArray(row.emails) ? row.emails : (email ? [{ type: "other", value: email }] : []),
-      addresses: Array.isArray(row.addresses) ? row.addresses : [],
-      urls: Array.isArray(row.urls) ? row.urls : []
+    var d = Object.assign({}, row)
+    d.phones = Array.isArray(row.phones) ? row.phones : (phone ? [{ type: "other", value: phone }] : [])
+    d.emails = Array.isArray(row.emails) ? row.emails : (email ? [{ type: "other", value: email }] : [])
+    d.addresses = Array.isArray(row.addresses) ? row.addresses : []
+    d.urls = Array.isArray(row.urls) ? row.urls : []
+    d.ims = Array.isArray(row.ims) ? row.ims : []
+    d.socials = Array.isArray(row.socials) ? row.socials : []
+    d.related = Array.isArray(row.related) ? row.related : []
+    d.dates = Array.isArray(row.dates) ? row.dates : []
+    d.groups = Array.isArray(row.groups) ? row.groups : []
+    return d
+  }
+
+  function movePane(dx) {
+    var order = ["groups", "list", "detail"]
+    var i = order.indexOf(root.pane)
+    if (i < 0) i = 1
+    root.pane = order[Math.max(0, Math.min(order.length - 1, i + dx))]
+    Qt.callLater(function() { if (focusScope) focusScope.forceActiveFocus() })
+  }
+
+  function appleId() {
+    return root.sync && root.sync.apple_id ? String(root.sync.apple_id).trim() : ""
+  }
+
+  function emailsOf(row) {
+    var out = []
+    if (!row) return out
+    if (row.email) out.push(String(row.email))
+    var emails = row.emails || []
+    for (var i = 0; i < emails.length; i++) {
+      var v = emails[i] && emails[i].value ? String(emails[i].value) : ""
+      if (v) out.push(v)
     }
+    return out
+  }
+
+  function findMyCard(list, appleId) {
+    var needle = String(appleId || "").trim().toLowerCase()
+    if (!needle || !list || !list.length) return null
+    var local = needle.split("@")[0]
+    var localHit = null
+    for (var i = 0; i < list.length; i++) {
+      var c = list[i]
+      if (!c || c.is_group) continue
+      var emails = root.emailsOf(c)
+      for (var j = 0; j < emails.length; j++) {
+        var e = emails[j].trim().toLowerCase()
+        if (e === needle) return c
+        if (!localHit && local && e.split("@")[0] === local) localHit = c
+      }
+    }
+    return localHit
+  }
+
+  function selectUid(uid) {
+    var want = String(uid || "")
+    if (!want) return false
+    for (var i = 0; i < root.contacts.length; i++) {
+      if (String(root.contacts[i].uid || "") === want) {
+        root.cursor = i
+        root.selectCurrent()
+        return true
+      }
+    }
+    return false
+  }
+
+  function openMyCard() {
+    root.myCardActive = true
+    root.pane = "groups"
+    root.groupFilter = ""
+    root.groupCursor = 0
+    var card = root.findMyCard(root.allContacts, root.appleId())
+    function show() {
+      if (!card) {
+        root.selected = null
+        return
+      }
+      if (!root.selectUid(card.uid)) root.selected = root.rowAsDetail(card)
+    }
+    Qt.callLater(show)
+  }
+
+  function applyGroupCursor() {
+    root.myCardActive = false
+    if (!root.groupItems.length) {
+      root.groupFilter = ""
+      return
+    }
+    var label = String(root.groupItems[root.groupCursor] || "All")
+    root.groupFilter = label === "All" ? "" : label
+    root.cursor = 0
+    root.selectCurrent()
+  }
+
+  function moveGroup(dy) {
+    if (root.myCardActive) {
+      if (dy > 0) {
+        root.myCardActive = false
+        root.groupCursor = 0
+        root.applyGroupCursor()
+      }
+      return
+    }
+    if (dy < 0 && root.groupCursor <= 0) {
+      root.openMyCard()
+      return
+    }
+    if (!root.groupItems.length) return
+    root.groupCursor = Math.max(0, Math.min(root.groupItems.length - 1, root.groupCursor + dy))
+    root.applyGroupCursor()
+  }
+
+  function syncGroupCursor() {
+    if (root.myCardActive) return
+    if (!root.groupFilter) {
+      root.groupCursor = 0
+      return
+    }
+    for (var i = 0; i < root.groupItems.length; i++) {
+      if (String(root.groupItems[i]) === root.groupFilter) {
+        root.groupCursor = i
+        return
+      }
+    }
+    root.groupCursor = 0
+    root.groupFilter = ""
+  }
+
+  function chooseGroup(index) {
+    root.groupCursor = index
+    root.pane = "groups"
+    root.applyGroupCursor()
   }
 
   function selectCurrent() {
@@ -380,7 +500,7 @@ Item {
         continue
       }
       var hay = [
-        c.fn, c.first, c.last, c.nickname, c.org, c.title, c.phone, c.email, c.note, c.bday
+        c.fn, c.first, c.last, c.middle, c.nickname, c.org, c.department, c.title, c.role, c.phone, c.email, c.note, c.bday
       ]
       var hit = false
       for (var j = 0; j < hay.length; j++) {
@@ -443,14 +563,16 @@ Item {
   function startNewGroup() {
     namingGroup = true
     newGroupDraft = ""
+    myCardActive = false
+    pane = "groups"
     Qt.callLater(function() {
-      if (!groupNameField) return
-      groupNameField.text = ""
-      groupNameField.forceActiveFocus()
+      if (!groupList) return
+      groupList.takeNameFocus()
     })
   }
 
   function createGroup() {
+    if (groupList) newGroupDraft = groupList.nameText()
     var name = String(newGroupDraft || "").trim()
     if (!name || !svc) return
     var existing = groupNames
@@ -570,23 +692,50 @@ Item {
     }
     if (searchFocused && (event.key === Qt.Key_Down || event.key === Qt.Key_Up)) {
       searchFocused = false
+      pane = "list"
       moveCursor(event.key === Qt.Key_Down ? 1 : -1)
       event.accepted = true
       return
     }
-    if (searchFocused) return
+    if (searchFocused || namingGroup) return
+    if (Keymap.matchChord(event, keys.left) || Keymap.matchChord(event, keys.leftAlt)) {
+      movePane(-1); event.accepted = true; return
+    }
+    if (Keymap.matchChord(event, keys.right) || Keymap.matchChord(event, keys.rightAlt)) {
+      movePane(1); event.accepted = true; return
+    }
+    if (event.key === Qt.Key_Tab) {
+      movePane((event.modifiers & Qt.ShiftModifier) ? -1 : 1)
+      event.accepted = true
+      return
+    }
     if (Keymap.matchChord(event, keys.down) || Keymap.matchChord(event, keys.downAlt)) {
-      moveCursor(1); event.accepted = true; return
+      if (pane === "groups") moveGroup(1)
+      else moveCursor(1)
+      event.accepted = true
+      return
     }
     if (Keymap.matchChord(event, keys.up) || Keymap.matchChord(event, keys.upAlt)) {
-      moveCursor(-1); event.accepted = true; return
+      if (pane === "groups") moveGroup(-1)
+      else moveCursor(-1)
+      event.accepted = true
+      return
     }
     if (Keymap.matchChord(event, keys.open)) {
-      selectCurrent(); event.accepted = true; return
+      if (pane === "detail") startEdit()
+      else if (pane === "groups") {
+        if (myCardActive) openMyCard()
+        else applyGroupCursor()
+      }
+      else selectCurrent()
+      event.accepted = true
+      return
     }
     if (Keymap.matchChord(event, keys.newContact)) { startNew(); event.accepted = true; return }
+    if (Keymap.matchChord(event, keys.newGroup)) { startNewGroup(); event.accepted = true; return }
     if (Keymap.matchChord(event, keys.edit)) { startEdit(); event.accepted = true; return }
     if (Keymap.matchChord(event, keys.deleteContact)) { confirmDelete = true; event.accepted = true; return }
+    if (Keymap.matchChord(event, keys.mail)) { emailSelected(); event.accepted = true; return }
     if (Keymap.matchChord(event, keys.sync)) {
       if (svc) svc.syncNow(function() {})
       event.accepted = true
@@ -605,6 +754,8 @@ Item {
     if (selected && String(selected.uid || "") === selectedUid()) return
     selectCurrent()
   }
+
+  onGroupNamesChanged: syncGroupCursor()
 
   Process {
     id: picker
@@ -631,9 +782,9 @@ Item {
     visible: root.opened
     title: "Contacts"
     color: root.background
-    implicitWidth: Style.space(920)
-    implicitHeight: Style.space(620)
-    minimumSize: Qt.size(Style.space(720), Style.space(480))
+    implicitWidth: Style.space(1040)
+    implicitHeight: Style.space(640)
+    minimumSize: Qt.size(Style.space(840), Style.space(500))
 
     onVisibleChanged: {
       if (!visible && root.opened && !root.closingFromHost) root.requestClose()
@@ -663,15 +814,18 @@ Item {
           color: root.popupBackground
 
           Row {
-            anchors.fill: parent
-            anchors.leftMargin: Style.space(16)
-            anchors.rightMargin: Style.space(16)
-            spacing: Style.space(12)
+            id: headerLeft
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(14)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(8)
 
             Button {
               anchors.verticalCenter: parent.verticalCenter
               iconText: "☰"
               tooltipText: "Options"
+              foreground: root.dim
+              accent: root.accent
               selected: root.settingsOpen
               onClicked: {
                 if (root.settingsOpen) root.closeSettings()
@@ -692,7 +846,7 @@ Item {
             TextField {
               id: searchField
               anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(240)
+              width: Style.space(220)
               placeholderText: "Search"
               onActiveFocusChanged: root.searchFocused = activeFocus
               onTextChanged: {
@@ -701,8 +855,14 @@ Item {
                 root.applySearch()
               }
             }
+          }
 
-            Item { width: 1; height: 1 }
+          Row {
+            id: headerRight
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(14)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(4)
 
             Row {
               anchors.verticalCenter: parent.verticalCenter
@@ -765,22 +925,70 @@ Item {
                 textFormat: Text.PlainText
                 color: root.accent
                 font.family: Style.font.family
-                font.pixelSize: Style.font.body
+                font.pixelSize: Style.font.caption
               }
             }
 
             Text {
               anchors.verticalCenter: parent.verticalCenter
               visible: root.notice.length > 0 && !root.syncing
+              width: Math.min(implicitWidth, Style.space(160))
               text: root.svc ? root.svc.plain(root.notice) : ""
               textFormat: Text.PlainText
               color: root.dim
               font.family: Style.font.family
-              font.pixelSize: Style.font.body
+              font.pixelSize: Style.font.caption
               elide: Text.ElideRight
             }
 
-            Item { width: Style.space(16); height: 1 }
+            Button {
+              visible: !root.settingsOpen && !root.editing
+              text: "New"
+              tooltipText: "New contact · n"
+              foreground: root.dim
+              accent: root.accent
+              fontSize: Style.font.caption
+              onClicked: root.startNew()
+            }
+            Button {
+              visible: !root.settingsOpen && !root.editing
+              text: "Group"
+              tooltipText: "New group · g"
+              foreground: root.dim
+              accent: root.accent
+              fontSize: Style.font.caption
+              onClicked: root.startNewGroup()
+            }
+            Button {
+              visible: !root.settingsOpen && !root.editing
+              text: "Edit"
+              tooltipText: "Edit · e"
+              foreground: root.dim
+              accent: root.accent
+              fontSize: Style.font.caption
+              enabled: !!root.selected
+              onClicked: root.startEdit()
+            }
+            Button {
+              visible: !root.settingsOpen && !root.editing
+              text: "Delete"
+              tooltipText: "Delete · d"
+              foreground: root.dim
+              accent: root.accent
+              fontSize: Style.font.caption
+              enabled: !!root.selected
+              onClicked: root.confirmDelete = true
+            }
+            Button {
+              visible: !root.settingsOpen && !root.editing
+              text: "Mail"
+              tooltipText: "Mail this card · m"
+              foreground: root.dim
+              accent: root.accent
+              fontSize: Style.font.caption
+              enabled: !!root.selected
+              onClicked: root.emailSelected()
+            }
           }
         }
 
@@ -792,147 +1000,30 @@ Item {
 
         Row {
           width: parent.width
-          height: parent.height - Style.space(52) - 1
+          height: parent.height - Style.space(52) - 1 - Style.space(36) - 1
 
           Rectangle {
-            width: Style.space(280)
+            width: Style.space(200)
             height: parent.height
             color: root.background
             clip: true
 
-            Column {
-              id: leftColumn
-              visible: !root.settingsOpen
+            GroupList {
+              id: groupList
               anchors.fill: parent
-              anchors.margins: Style.space(8)
-              spacing: Style.space(8)
-
-              Item {
-                id: groupArea
-                width: parent.width
-                height: Math.min(groupFlick.contentHeight, Style.space(108))
-
-                Flickable {
-                  id: groupFlick
-                  anchors.fill: parent
-                  clip: true
-                  boundsBehavior: Flickable.StopAtBounds
-                  flickableDirection: Flickable.VerticalFlick
-                  contentWidth: width
-                  contentHeight: groupFlow.implicitHeight
-                  ScrollBar.vertical: ScrollBar {
-                    policy: groupFlick.contentHeight > groupFlick.height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
-                  }
-
-                  Flow {
-                    id: groupFlow
-                    width: groupFlick.width - Style.space(8)
-                    spacing: Style.space(6)
-
-                    Repeater {
-                      model: ["All"].concat(root.groupNames)
-                      delegate: Rectangle {
-                        required property var modelData
-                        height: Style.space(28)
-                        width: Math.min(groupFlow.width, chipLabel.implicitWidth + Style.space(16))
-                        radius: height / 2
-                        color: {
-                          var label = String(modelData)
-                          var active = (label === "All" && !root.groupFilter) || label === root.groupFilter
-                          return active
-                            ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.22)
-                            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
-                        }
-                        border.width: Style.normalBorderWidth
-                        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
-                        Text {
-                          id: chipLabel
-                          anchors.centerIn: parent
-                          width: parent.width - Style.space(12)
-                          horizontalAlignment: Text.AlignHCenter
-                          elide: Text.ElideRight
-                          text: String(modelData)
-                          textFormat: Text.PlainText
-                          color: root.foreground
-                          font.family: Style.font.family
-                          font.pixelSize: Style.font.body
-                        }
-                        MouseArea {
-                          anchors.fill: parent
-                          onClicked: {
-                            var label = String(modelData)
-                            root.groupFilter = label === "All" ? "" : label
-                            root.cursor = 0
-                            root.selectCurrent()
-                          }
-                        }
-                      }
-                    }
-
-                    Rectangle {
-                      visible: !root.namingGroup
-                      height: Style.space(28)
-                      width: addLabel.implicitWidth + Style.space(16)
-                      radius: height / 2
-                      color: "transparent"
-                      border.width: Style.normalBorderWidth
-                      border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.45)
-                      Text {
-                        id: addLabel
-                        anchors.centerIn: parent
-                        text: "+ Group"
-                        textFormat: Text.PlainText
-                        color: root.accent
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.body
-                      }
-                      MouseArea {
-                        anchors.fill: parent
-                        onClicked: root.startNewGroup()
-                      }
-                    }
-
-                    TextField {
-                      id: groupNameField
-                      visible: root.namingGroup
-                      width: Math.max(Style.space(120), groupFlow.width * 0.62)
-                      placeholderText: "Group name"
-                      onTextChanged: root.newGroupDraft = text
-                      onAccepted: root.createGroup()
-                    }
-                  }
-                }
-              }
-
-              Item {
-                width: parent.width
-                height: Math.max(Style.space(80), leftColumn.height - groupArea.height - leftColumn.spacing)
-
-                ContactList {
-                  id: list
-                  anchors.fill: parent
-                  contacts: root.contacts
-                  cursor: root.cursor
-                  textColor: root.foreground
-                  dimColor: root.dim
-                  accent: root.accent
-                  background: root.background
-                  visible: root.contacts.length > 0 && !(root.svc && root.svc.daemonMissing)
-                  onActivated: function(index) {
-                    root.cursor = index
-                    root.selectCurrent()
-                  }
-                }
-
-                EmptyState {
-                  anchors.fill: parent
-                  visible: root.contacts.length === 0 && !(root.svc && root.svc.daemonMissing)
-                  textColor: root.foreground
-                  dimColor: root.dim
-                  title: "No contacts yet"
-                  body: "Press n to add someone, or drop a vCard on this window."
-                }
-              }
+              visible: !root.settingsOpen
+              groups: root.groupItems
+              cursor: root.groupCursor
+              focused: root.pane === "groups" && !root.settingsOpen
+              naming: root.namingGroup
+              myCardActive: root.myCardActive
+              textColor: root.foreground
+              dimColor: root.dim
+              accent: root.accent
+              background: root.background
+              onActivated: function(index) { root.chooseGroup(index) }
+              onMyCardRequested: root.openMyCard()
+              onNameAccepted: root.createGroup()
             }
 
             EmptyState {
@@ -1018,13 +1109,43 @@ Item {
           }
 
           Rectangle {
-            width: root.accountsColumnOpen ? Style.space(260) : 0
+            width: root.settingsOpen ? (root.accountsColumnOpen ? Style.space(260) : 0) : Style.space(280)
             height: parent.height
-            visible: root.accountsColumnOpen
+            visible: !root.settingsOpen || root.accountsColumnOpen
             color: root.background
             clip: true
 
+            ContactList {
+              id: list
+              anchors.fill: parent
+              anchors.margins: Style.space(6)
+              visible: !root.settingsOpen && root.contacts.length > 0 && !(root.svc && root.svc.daemonMissing)
+              contacts: root.contacts
+              cursor: root.cursor
+              focused: root.pane === "list" && !root.settingsOpen
+              textColor: root.foreground
+              dimColor: root.dim
+              accent: root.accent
+              background: root.background
+              onActivated: function(index) {
+                root.pane = "list"
+                root.myCardActive = false
+                root.cursor = index
+                root.selectCurrent()
+              }
+            }
+
+            EmptyState {
+              anchors.fill: parent
+              visible: !root.settingsOpen && root.contacts.length === 0 && !(root.svc && root.svc.daemonMissing)
+              textColor: root.foreground
+              dimColor: root.dim
+              title: "No contacts yet"
+              body: "Press n to add someone, or drop a vCard on this window."
+            }
+
             Column {
+              visible: root.accountsColumnOpen
               anchors.fill: parent
               anchors.margins: Style.space(12)
               spacing: Style.space(6)
@@ -1105,16 +1226,25 @@ Item {
           }
 
           Rectangle {
-            width: root.accountsColumnOpen ? 1 : 0
+            width: (!root.settingsOpen || root.accountsColumnOpen) ? 1 : 0
             height: parent.height
-            visible: root.accountsColumnOpen
+            visible: !root.settingsOpen || root.accountsColumnOpen
             color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
           }
 
           Rectangle {
-            width: parent.width - Style.space(281) - (root.accountsColumnOpen ? Style.space(261) : 0)
+            width: parent.width - Style.space(201) - ((!root.settingsOpen || root.accountsColumnOpen) ? (root.settingsOpen ? Style.space(261) : Style.space(281)) : 0)
             height: parent.height
             color: root.background
+
+            Rectangle {
+              visible: root.pane === "detail" && !root.settingsOpen && !root.editing
+              anchors.left: parent.left
+              width: 2
+              height: parent.height
+              color: root.accent
+              z: 2
+            }
 
             ContactDetail {
               anchors.fill: parent
@@ -1124,10 +1254,6 @@ Item {
               dimColor: root.dim
               accent: root.accent
               background: root.background
-              onEditRequested: root.startEdit()
-              onDeleteRequested: root.confirmDelete = true
-              onExportRequested: root.pickExportSelected()
-              onEmailRequested: root.emailSelected()
             }
 
             EmptyState {
@@ -1135,8 +1261,10 @@ Item {
               visible: !root.editing && !root.settingsOpen && !root.selected
               textColor: root.foreground
               dimColor: root.dim
-              title: "Select a contact"
-              body: "Use j and k to move, Enter to open, e to edit."
+              title: root.myCardActive ? "No card for you yet" : "Select a contact"
+              body: root.myCardActive
+                ? "Your card is the contact that uses your iCloud email."
+                : "h/l or Tab for columns. j/k to move. Enter opens. e edits."
             }
 
             ContactEditor {
@@ -1221,12 +1349,18 @@ Item {
                 Button {
                   text: root.setupBusy ? "Working…" : "Save and sync"
                   enabled: !root.setupBusy
+                  foreground: root.dim
+                  accent: root.accent
+                  fontSize: Style.font.caption
                   onClicked: root.saveIcloud()
                 }
                 Button {
                   text: "Sync now"
                   visible: !!(root.sync && (root.sync.has_password || root.sync.apple_id))
                   enabled: !root.setupBusy
+                  foreground: root.dim
+                  accent: root.accent
+                  fontSize: Style.font.caption
                   onClicked: {
                     if (!root.svc) return
                     root.setupError = "Looking for your contacts on iCloud…"
@@ -1257,11 +1391,42 @@ Item {
                 }
                 Row {
                   spacing: Style.space(8)
-                  Button { text: "Delete"; onClicked: root.deleteSelected() }
-                  Button { text: "Cancel"; onClicked: root.confirmDelete = false }
+                  Button { text: "Delete"; foreground: root.dim; accent: root.accent; fontSize: Style.font.caption; onClicked: root.deleteSelected() }
+                  Button { text: "Cancel"; foreground: root.dim; accent: root.accent; fontSize: Style.font.caption; onClicked: root.confirmDelete = false }
                 }
               }
             }
+          }
+        }
+
+        Rectangle {
+          width: parent.width
+          height: 1
+          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+        }
+
+        Rectangle {
+          width: parent.width
+          height: Style.space(36)
+          color: root.popupBackground
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: Style.space(16)
+            anchors.rightMargin: Style.space(16)
+            text: {
+              var g = root.pane === "groups" ? "[groups]" : "groups"
+              var l = root.pane === "list" ? "[list]" : "list"
+              var d = root.pane === "detail" ? "[card]" : "card"
+              return g + "  " + l + "  " + d + "    h/l columns · j/k move · / search · n new · g group · e edit · d delete · m mail · ? keys"
+            }
+            textFormat: Text.PlainText
+            color: root.dim
+            elide: Text.ElideRight
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body
           }
         }
       }

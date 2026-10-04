@@ -9,10 +9,6 @@ Flickable {
   property color dimColor: Color.muted
   property color accent: Color.accent
   property color background: Color.background
-  signal editRequested()
-  signal deleteRequested()
-  signal exportRequested()
-  signal emailRequested()
 
   clip: true
   contentWidth: width
@@ -24,9 +20,17 @@ Flickable {
   readonly property string orgLine: {
     if (!contact) return ""
     var t = String(contact.title || "")
+    var r = String(contact.role || "")
     var o = String(contact.org || "")
-    if (t && o) return t + " · " + o
-    return t || o
+    var d = String(contact.department || "")
+    var job = t
+    if (t && r) job = t + " · " + r
+    else if (r) job = r
+    var place = o
+    if (o && d) place = o + " · " + d
+    else if (d) place = d
+    if (job && place) return job + " · " + place
+    return job || place
   }
 
   function linesOf(arr, key) {
@@ -57,6 +61,34 @@ Flickable {
     for (var i = 0; i < arr.length; i++) {
       var line = root.addressLine(arr[i])
       if (line) out.push({ type: arr[i] && arr[i].type ? String(arr[i].type) : "address", value: line })
+    }
+    return out
+  }
+
+  function fieldRows() {
+    if (!root.contact) return []
+    var c = root.contact
+    var out = []
+    function addAll(arr, fallback) {
+      var rows = root.linesOf(arr, "value")
+      for (var i = 0; i < rows.length; i++)
+        out.push({ type: rows[i].type || fallback, value: rows[i].value })
+    }
+    addAll(c.phones, "phone")
+    addAll(c.emails, "email")
+    var addrs = root.addressLines()
+    for (var a = 0; a < addrs.length; a++) out.push(addrs[a])
+    addAll(c.urls, "web")
+    addAll(c.ims, "im")
+    addAll(c.socials, "social")
+    addAll(c.related, "related")
+    if (c.bday) out.push({ type: "birthday", value: String(c.bday) })
+    if (c.anniversary) out.push({ type: "anniversary", value: String(c.anniversary) })
+    addAll(c.dates, "date")
+    if (c.groups && c.groups.length) {
+      var g = []
+      for (var i = 0; i < c.groups.length; i++) g.push(String(c.groups[i]))
+      out.push({ type: "groups", value: g.join(" · ") })
     }
     return out
   }
@@ -121,20 +153,21 @@ Flickable {
     }
 
     Repeater {
-      model: root.linesOf(root.contact ? root.contact.phones : [], "value")
+      model: root.fieldRows()
       delegate: Row {
         spacing: Style.space(12)
         width: col.width - Style.space(40)
         Text {
-          width: Style.space(72)
-          text: String(modelData.type || "phone")
+          width: Style.space(88)
+          text: String(modelData.type || "")
           textFormat: Text.PlainText
           color: root.dimColor
           font.family: Style.font.family
           font.pixelSize: Style.font.body
+          wrapMode: Text.Wrap
         }
         Text {
-          width: parent.width - Style.space(84)
+          width: parent.width - Style.space(100)
           text: String(modelData.value || "")
           textFormat: Text.PlainText
           wrapMode: Text.Wrap
@@ -142,104 +175,6 @@ Flickable {
           font.family: Style.font.family
           font.pixelSize: Style.font.body
         }
-      }
-    }
-
-    Repeater {
-      model: root.linesOf(root.contact ? root.contact.emails : [], "value")
-      delegate: Row {
-        spacing: Style.space(12)
-        width: col.width - Style.space(40)
-        Text {
-          width: Style.space(72)
-          text: String(modelData.type || "email")
-          textFormat: Text.PlainText
-          color: root.dimColor
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-        }
-        Text {
-          width: parent.width - Style.space(84)
-          text: String(modelData.value || "")
-          textFormat: Text.PlainText
-          wrapMode: Text.Wrap
-          color: root.textColor
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-        }
-      }
-    }
-
-    Repeater {
-      model: root.addressLines()
-      delegate: Row {
-        spacing: Style.space(12)
-        width: col.width - Style.space(40)
-        Text {
-          width: Style.space(72)
-          text: String(modelData.type || "address")
-          textFormat: Text.PlainText
-          color: root.dimColor
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-        }
-        Text {
-          width: parent.width - Style.space(84)
-          text: String(modelData.value || "")
-          textFormat: Text.PlainText
-          wrapMode: Text.Wrap
-          color: root.textColor
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-        }
-      }
-    }
-
-    Repeater {
-      model: root.linesOf(root.contact ? root.contact.urls : [], "value")
-      delegate: Row {
-        spacing: Style.space(12)
-        width: col.width - Style.space(40)
-        Text {
-          width: Style.space(72)
-          text: String(modelData.type || "web")
-          textFormat: Text.PlainText
-          color: root.dimColor
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-        }
-        Text {
-          width: parent.width - Style.space(84)
-          text: String(modelData.value || "")
-          textFormat: Text.PlainText
-          wrapMode: Text.Wrap
-          color: root.textColor
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-        }
-      }
-    }
-
-    Row {
-      visible: !!(root.contact && root.contact.bday)
-      spacing: Style.space(12)
-      width: col.width - Style.space(40)
-      Text {
-        width: Style.space(72)
-        text: "birthday"
-        textFormat: Text.PlainText
-        color: root.dimColor
-        font.family: Style.font.family
-        font.pixelSize: Style.font.body
-      }
-      Text {
-        width: parent.width - Style.space(84)
-        text: root.contact ? String(root.contact.bday) : ""
-        textFormat: Text.PlainText
-        wrapMode: Text.Wrap
-        color: root.textColor
-        font.family: Style.font.family
-        font.pixelSize: Style.font.body
       }
     }
 
@@ -252,47 +187,6 @@ Flickable {
       color: root.textColor
       font.family: Style.font.family
       font.pixelSize: Style.font.body
-    }
-
-    Text {
-      visible: !!(root.contact && root.contact.groups && root.contact.groups.length)
-      width: col.width - Style.space(40)
-      text: {
-        if (!root.contact || !root.contact.groups) return ""
-        var g = []
-        for (var i = 0; i < root.contact.groups.length; i++) g.push(String(root.contact.groups[i]))
-        return g.join(" · ")
-      }
-      textFormat: Text.PlainText
-      wrapMode: Text.Wrap
-      color: root.dimColor
-      font.family: Style.font.family
-      font.pixelSize: Style.font.body
-    }
-
-    Flow {
-      width: col.width - Style.space(40)
-      spacing: Style.space(8)
-      Button {
-        text: "Edit"
-        bordered: true
-        onClicked: root.editRequested()
-      }
-      Button {
-        text: "Delete"
-        bordered: true
-        onClicked: root.deleteRequested()
-      }
-      Button {
-        text: "Export"
-        bordered: true
-        onClicked: root.exportRequested()
-      }
-      Button {
-        text: "Mail"
-        bordered: true
-        onClicked: root.emailRequested()
-      }
     }
   }
 }

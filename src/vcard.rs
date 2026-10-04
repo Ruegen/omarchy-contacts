@@ -1,7 +1,20 @@
 //! vCard 3.0 / 4.0 subset used by the address book.
 
+use std::collections::HashMap;
+
 use crate::contact::{Address, Contact, Email, Link, Phone};
 use crate::paths::MAX_PHOTO_BYTES;
+
+#[derive(Clone, Copy)]
+enum GroupField {
+    Phone(usize),
+    Email(usize),
+    Url(usize),
+    Address(usize),
+    Im(usize),
+    Social(usize),
+    Related(usize),
+}
 
 #[derive(Debug)]
 pub struct ParseError(pub String);
@@ -42,6 +55,9 @@ pub fn split_cards(input: &str) -> Vec<String> {
 pub fn parse_card(text: &str) -> Result<Contact, ParseError> {
     let unfolded = unfold(&decode_markup(text));
     let mut c = Contact::default();
+    let mut field_by_group: HashMap<String, GroupField> = HashMap::new();
+    let mut label_by_group: HashMap<String, String> = HashMap::new();
+    let mut date_by_group: HashMap<String, String> = HashMap::new();
     for line in unfolded.lines() {
         if line.is_empty() {
             continue;
@@ -50,20 +66,23 @@ pub fn parse_card(text: &str) -> Result<Contact, ParseError> {
         if upper == "BEGIN:VCARD" || upper == "END:VCARD" {
             continue;
         }
-        let Some((name, params, value)) = split_prop(line) else {
+        let Some((raw_name, params, value)) = split_prop(line) else {
             continue;
         };
-        let name = strip_group(&name).to_ascii_uppercase();
+        let (group, name) = split_grouped(&raw_name);
+        let name = name.to_ascii_uppercase();
         match name.as_str() {
             "VERSION" => {}
             "UID" => c.uid = unescape(&value),
             "FN" => c.fn_ = unescape(&value),
             "N" => apply_n(&mut c, &value),
             "NICKNAME" => c.nickname = unescape(&value),
-            "ORG" => c.org = unescape(&value).split(';').next().unwrap_or("").to_string(),
+            "ORG" => apply_org(&mut c, &value),
             "TITLE" => c.title = unescape(&value),
+            "ROLE" => c.role = unescape(&value),
             "NOTE" => c.note = decode_note(&params, &value),
             "BDAY" => c.bday = unescape(&value),
+            "ANNIVERSARY" => c.anniversary = unescape(&value),
             "REV" => c.rev = unescape(&value),
             "TEL" => {
                 let v = normalize_tel(&unescape(&value));
@@ -72,6 +91,13 @@ pub fn parse_card(text: &str) -> Result<Contact, ParseError> {
                         type_: tel_type(&params),
                         value: v,
                     });
+                    remember_group(
+                        &group,
+                        GroupField::Phone(c.phones.len() - 1),
+                        &mut field_by_group,
+                        &label_by_group,
+                        &mut c,
+                    );
                 }
             }
             "EMAIL" => {
@@ -81,11 +107,25 @@ pub fn parse_card(text: &str) -> Result<Contact, ParseError> {
                         type_: email_type(&params),
                         value: v,
                     });
+                    remember_group(
+                        &group,
+                        GroupField::Email(c.emails.len() - 1),
+                        &mut field_by_group,
+                        &label_by_group,
+                        &mut c,
+                    );
                 }
             }
             "ADR" => {
                 if let Some(addr) = parse_adr(&params, &value) {
                     c.addresses.push(addr);
+                    remember_group(
+                        &group,
+                        GroupField::Address(c.addresses.len() - 1),
+                        &mut field_by_group,
+                        &label_by_group,
+                        &mut c,
+                    );
                 }
             }
             "URL" => {
@@ -93,6 +133,89 @@ pub fn parse_card(text: &str) -> Result<Contact, ParseError> {
                 if !v.is_empty() {
                     c.urls.push(Link {
                         type_: url_type(&params),
+                        value: v,
+                    });
+                    remember_group(
+                        &group,
+                        GroupField::Url(c.urls.len() - 1),
+                        &mut field_by_group,
+                        &label_by_group,
+                        &mut c,
+                    );
+                }
+            }
+            "IMPP" => {
+                let v = unescape(&value);
+                if !v.is_empty() {
+                    c.ims.push(Link {
+                        type_: im_type(&params, &v),
+                        value: strip_im_scheme(&v),
+                    });
+                    remember_group(
+                        &group,
+                        GroupField::Im(c.ims.len() - 1),
+                        &mut field_by_group,
+                        &label_by_group,
+                        &mut c,
+                    );
+                }
+            }
+            "X-SOCIALPROFILE" => {
+                let v = unescape(&value);
+                if !v.is_empty() {
+                    c.socials.push(Link {
+                        type_: social_type(&params),
+                        value: v,
+                    });
+                    remember_group(
+                        &group,
+                        GroupField::Social(c.socials.len() - 1),
+                        &mut field_by_group,
+                        &label_by_group,
+                        &mut c,
+                    );
+                }
+            }
+            "RELATED" | "X-ABRELATEDNAMES" => {
+                let v = unescape(&value);
+                if !v.is_empty() {
+                    c.related.push(Link {
+                        type_: related_type(&params),
+                        value: v,
+                    });
+                    remember_group(
+                        &group,
+                        GroupField::Related(c.related.len() - 1),
+                        &mut field_by_group,
+                        &label_by_group,
+                        &mut c,
+                    );
+                }
+            }
+            "X-ABDATE" => {
+                let v = unescape(&value);
+                if !v.is_empty() && !group.is_empty() {
+                    date_by_group.insert(group.clone(), v);
+                } else if !v.is_empty() && c.anniversary.is_empty() {
+                    c.anniversary = v;
+                }
+            }
+            "X-ABLABEL" => {
+                let label = decode_ab_label(&unescape(&value));
+                if !group.is_empty() && !label.is_empty() {
+                    label_by_group.insert(group.clone(), label.clone());
+                    apply_group_label(&mut c, &field_by_group, &group, &label);
+                }
+            }
+            "X-AIM" | "X-ICQ" | "X-JABBER" | "X-MSN" | "X-YAHOO" | "X-SKYPE"
+            | "X-GOOGLE-TALK" | "X-GTALK" => {
+                let v = unescape(&value);
+                if !v.is_empty() {
+                    c.ims.push(Link {
+                        type_: name
+                            .trim_start_matches("X-")
+                            .replace("GOOGLE-TALK", "gtalk")
+                            .to_ascii_lowercase(),
                         value: v,
                     });
                 }
@@ -121,6 +244,20 @@ pub fn parse_card(text: &str) -> Result<Contact, ParseError> {
             _ => {}
         }
     }
+    for (group, value) in date_by_group {
+        let label = label_by_group
+            .get(&group)
+            .map(|s| s.as_str())
+            .unwrap_or("date");
+        if label.eq_ignore_ascii_case("anniversary") && c.anniversary.is_empty() {
+            c.anniversary = value;
+        } else if !label.eq_ignore_ascii_case("anniversary") {
+            c.dates.push(Link {
+                type_: label.to_string(),
+                value,
+            });
+        }
+    }
     c.normalize();
     if c.fn_.is_empty() && c.first.is_empty() && c.last.is_empty() {
         return Err(ParseError("empty contact".into()));
@@ -132,18 +269,36 @@ pub fn serialize_card(c: &Contact) -> String {
     let mut out = String::from("BEGIN:VCARD\r\nVERSION:3.0\r\n");
     push_prop(&mut out, "UID", &c.uid);
     push_prop(&mut out, "FN", &c.display_name());
-    let n = format!("{};{};;;", escape(&c.last), escape(&c.first));
     out.push_str("N:");
-    out.push_str(&n);
+    out.push_str(&escape(&c.last));
+    out.push(';');
+    out.push_str(&escape(&c.first));
+    out.push(';');
+    out.push_str(&escape(&c.middle));
+    out.push(';');
+    out.push_str(&escape(&c.prefix));
+    out.push(';');
+    out.push_str(&escape(&c.suffix));
     out.push_str("\r\n");
     if !c.nickname.is_empty() {
         push_prop(&mut out, "NICKNAME", &c.nickname);
     }
-    if !c.org.is_empty() {
-        push_prop(&mut out, "ORG", &c.org);
+    if !c.org.is_empty() || !c.department.is_empty() {
+        if c.department.is_empty() {
+            push_prop(&mut out, "ORG", &c.org);
+        } else {
+            out.push_str("ORG:");
+            out.push_str(&escape(&c.org));
+            out.push(';');
+            out.push_str(&escape(&c.department));
+            out.push_str("\r\n");
+        }
     }
     if !c.title.is_empty() {
         push_prop(&mut out, "TITLE", &c.title);
+    }
+    if !c.role.is_empty() {
+        push_prop(&mut out, "ROLE", &c.role);
     }
     for p in &c.phones {
         out.push_str("TEL;TYPE=");
@@ -165,6 +320,9 @@ pub fn serialize_card(c: &Contact) -> String {
     if !c.bday.is_empty() {
         push_prop(&mut out, "BDAY", &c.bday);
     }
+    if !c.anniversary.is_empty() {
+        push_prop(&mut out, "ANNIVERSARY", &c.anniversary);
+    }
     for a in &c.addresses {
         out.push_str("ADR;TYPE=");
         out.push_str(&escape_param(&a.type_));
@@ -182,6 +340,34 @@ pub fn serialize_card(c: &Contact) -> String {
     }
     for u in &c.urls {
         out.push_str("URL;TYPE=");
+        out.push_str(&escape_param(&u.type_));
+        out.push(':');
+        out.push_str(&escape(&u.value));
+        out.push_str("\r\n");
+    }
+    for u in &c.ims {
+        out.push_str("IMPP;X-SERVICE-TYPE=");
+        out.push_str(&escape_param(&u.type_));
+        out.push(':');
+        out.push_str(&escape(&u.value));
+        out.push_str("\r\n");
+    }
+    for u in &c.socials {
+        out.push_str("X-SOCIALPROFILE;TYPE=");
+        out.push_str(&escape_param(&u.type_));
+        out.push(':');
+        out.push_str(&escape(&u.value));
+        out.push_str("\r\n");
+    }
+    for u in &c.related {
+        out.push_str("X-ABRELATEDNAMES;TYPE=");
+        out.push_str(&escape_param(&u.type_));
+        out.push(':');
+        out.push_str(&escape(&u.value));
+        out.push_str("\r\n");
+    }
+    for u in &c.dates {
+        out.push_str("X-ABDATE;TYPE=");
         out.push_str(&escape_param(&u.type_));
         out.push(':');
         out.push_str(&escape(&u.value));
@@ -260,6 +446,150 @@ fn strip_group(name: &str) -> &str {
         Some(i) => &name[i + 1..],
         None => name,
     }
+}
+
+fn split_grouped(name: &str) -> (String, String) {
+    match name.find('.') {
+        Some(i) => (name[..i].to_string(), name[i + 1..].to_string()),
+        None => (String::new(), name.to_string()),
+    }
+}
+
+fn remember_group(
+    group: &str,
+    field: GroupField,
+    field_by_group: &mut HashMap<String, GroupField>,
+    label_by_group: &HashMap<String, String>,
+    c: &mut Contact,
+) {
+    if group.is_empty() {
+        return;
+    }
+    field_by_group.insert(group.to_string(), field);
+    if let Some(label) = label_by_group.get(group) {
+        apply_group_label(c, field_by_group, group, label);
+    }
+}
+
+fn apply_group_label(
+    c: &mut Contact,
+    field_by_group: &HashMap<String, GroupField>,
+    group: &str,
+    label: &str,
+) {
+    if label.is_empty() {
+        return;
+    }
+    match field_by_group.get(group).copied() {
+        Some(GroupField::Phone(i)) => {
+            if let Some(p) = c.phones.get_mut(i) {
+                p.type_ = label.to_string();
+            }
+        }
+        Some(GroupField::Email(i)) => {
+            if let Some(p) = c.emails.get_mut(i) {
+                p.type_ = label.to_string();
+            }
+        }
+        Some(GroupField::Url(i)) => {
+            if let Some(p) = c.urls.get_mut(i) {
+                p.type_ = label.to_string();
+            }
+        }
+        Some(GroupField::Address(i)) => {
+            if let Some(p) = c.addresses.get_mut(i) {
+                p.type_ = label.to_string();
+            }
+        }
+        Some(GroupField::Im(i)) => {
+            if let Some(p) = c.ims.get_mut(i) {
+                p.type_ = label.to_string();
+            }
+        }
+        Some(GroupField::Social(i)) => {
+            if let Some(p) = c.socials.get_mut(i) {
+                p.type_ = label.to_string();
+            }
+        }
+        Some(GroupField::Related(i)) => {
+            if let Some(p) = c.related.get_mut(i) {
+                p.type_ = label.to_string();
+            }
+        }
+        None => {}
+    }
+}
+
+fn decode_ab_label(v: &str) -> String {
+    let v = v.trim();
+    if let Some(inner) = v
+        .strip_prefix("_$!<")
+        .and_then(|s| s.strip_suffix(">!$_"))
+    {
+        return inner.to_ascii_lowercase();
+    }
+    v.to_string()
+}
+
+fn apply_org(c: &mut Contact, value: &str) {
+    let parts: Vec<String> = unescape(value)
+        .split(';')
+        .map(|s| s.trim().to_string())
+        .collect();
+    c.org = parts.first().cloned().unwrap_or_default();
+    c.department = parts.get(1).cloned().unwrap_or_default();
+}
+
+fn im_type(params: &str, value: &str) -> String {
+    for part in params.split(';') {
+        let p = part.trim();
+        let upper = p.to_ascii_uppercase();
+        if let Some(rest) = upper.strip_prefix("X-SERVICE-TYPE=") {
+            let t = rest.trim().trim_matches('"').to_ascii_lowercase();
+            if !t.is_empty() {
+                return t;
+            }
+        }
+    }
+    let types = param_types(params);
+    if let Some(t) = types.into_iter().find(|t| t != "pref" && t != "other") {
+        return t;
+    }
+    if let Some((scheme, _)) = value.split_once(':') {
+        let s = scheme.trim().to_ascii_lowercase();
+        if !s.is_empty() && s != "http" && s != "https" {
+            return s;
+        }
+    }
+    "im".into()
+}
+
+fn strip_im_scheme(value: &str) -> String {
+    let v = value.trim();
+    match v.split_once(':') {
+        Some((scheme, rest))
+            if !scheme.contains('/') && !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") =>
+        {
+            rest.trim().to_string()
+        }
+        _ => v.to_string(),
+    }
+}
+
+fn social_type(params: &str) -> String {
+    let types = param_types(params);
+    types
+        .into_iter()
+        .find(|t| t != "pref")
+        .unwrap_or_else(|| "social".into())
+}
+
+fn related_type(params: &str) -> String {
+    let types = param_types(params);
+    types
+        .into_iter()
+        .find(|t| t != "pref")
+        .unwrap_or_else(|| "related".into())
 }
 
 fn member_uid(v: &str) -> String {
@@ -451,6 +781,9 @@ fn apply_n(c: &mut Contact, value: &str) {
     let parts: Vec<String> = value.split(';').map(unescape).collect();
     c.last = parts.first().cloned().unwrap_or_default();
     c.first = parts.get(1).cloned().unwrap_or_default();
+    c.middle = parts.get(2).cloned().unwrap_or_default();
+    c.prefix = parts.get(3).cloned().unwrap_or_default();
+    c.suffix = parts.get(4).cloned().unwrap_or_default();
 }
 
 fn param_types(params: &str) -> Vec<String> {
@@ -474,7 +807,7 @@ fn param_types(params: &str) -> Vec<String> {
 
 fn tel_type(params: &str) -> String {
     let types = param_types(params);
-    for want in ["cell", "mobile", "work", "home", "fax", "voice", "pref"] {
+    for want in ["cell", "mobile", "iphone", "work", "home", "fax", "main", "pager", "voice", "pref"] {
         if types.iter().any(|t| t == want) {
             return if want == "mobile" {
                 "cell".into()
@@ -701,5 +1034,29 @@ mod tests {
     fn rev_last_write_wins() {
         assert!(rev_newer("20240102T000000Z", "20240101T000000Z"));
         assert!(!rev_newer("2024-01-01", "20240102T00"));
+    }
+
+    #[test]
+    fn apple_extra_fields() {
+        let src = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:marie\r\nN:Curie;Marie;Skłodowska;Dr.;PhD\r\nFN:Dr. Marie Curie\r\nORG:Radium Institute;Physics\r\nTITLE:Professor\r\nROLE:Researcher\r\nitem1.TEL;type=CELL:+331\r\nitem1.X-ABLabel:Lab\r\nitem2.EMAIL;type=INTERNET:m@lab.fr\r\nitem2.X-ABLabel:_$!<Work>!$_\r\nIMPP;X-SERVICE-TYPE=Skype:skype:marie.curie\r\nX-SOCIALPROFILE;TYPE=twitter:https://twitter.com/marie\r\nitem3.X-ABRELATEDNAMES:Pierre Curie\r\nitem3.X-ABLabel:_$!<Spouse>!$_\r\nitem4.X-ABDATE:1895-07-26\r\nitem4.X-ABLabel:_$!<Anniversary>!$_\r\nX-JABBER:marie@chat\r\nEND:VCARD\r\n";
+        let c = parse_card(src).unwrap();
+        assert_eq!(c.middle, "Skłodowska");
+        assert_eq!(c.prefix, "Dr.");
+        assert_eq!(c.suffix, "PhD");
+        assert_eq!(c.department, "Physics");
+        assert_eq!(c.role, "Researcher");
+        assert_eq!(c.phones[0].type_, "Lab");
+        assert_eq!(c.emails[0].type_, "work");
+        assert_eq!(c.ims[0].type_, "skype");
+        assert_eq!(c.ims[0].value, "marie.curie");
+        assert_eq!(c.ims[1].type_, "jabber");
+        assert_eq!(c.socials[0].type_, "twitter");
+        assert_eq!(c.related[0].type_, "spouse");
+        assert_eq!(c.related[0].value, "Pierre Curie");
+        assert_eq!(c.anniversary, "1895-07-26");
+        let back = parse_card(&serialize_card(&c)).unwrap();
+        assert_eq!(back.department, "Physics");
+        assert_eq!(back.ims.len(), 2);
+        assert_eq!(back.socials[0].value, "https://twitter.com/marie");
     }
 }

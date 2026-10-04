@@ -534,12 +534,18 @@ fn contact_from_json(v: &Value) -> Result<Contact, String> {
         uid: v.get("uid").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         first: v.get("first").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         last: v.get("last").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        middle: v.get("middle").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        prefix: v.get("prefix").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        suffix: v.get("suffix").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         fn_: v.get("fn").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         nickname: v.get("nickname").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         org: v.get("org").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        department: v.get("department").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         title: v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        role: v.get("role").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         note: v.get("note").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         bday: v.get("bday").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        anniversary: v.get("anniversary").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         ..Contact::default()
     };
     if let Some(arr) = v.get("phones").and_then(|x| x.as_array()) {
@@ -564,6 +570,21 @@ fn contact_from_json(v: &Value) -> Result<Contact, String> {
                 type_: p.get("type").and_then(|x| x.as_str()).unwrap_or("other").to_string(),
                 value: p.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             });
+        }
+    }
+    for (key, dest) in [
+        ("ims", &mut c.ims),
+        ("socials", &mut c.socials),
+        ("related", &mut c.related),
+        ("dates", &mut c.dates),
+    ] {
+        if let Some(arr) = v.get(key).and_then(|x| x.as_array()) {
+            for p in arr {
+                dest.push(Link {
+                    type_: p.get("type").and_then(|x| x.as_str()).unwrap_or("other").to_string(),
+                    value: p.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                });
+            }
         }
     }
     if let Some(arr) = v.get("addresses").and_then(|x| x.as_array()) {

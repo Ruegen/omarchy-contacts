@@ -11,10 +11,16 @@ function defaults() {
     down: "Down",
     upAlt: "k",
     downAlt: "j",
+    left: "Left",
+    right: "Right",
+    leftAlt: "h",
+    rightAlt: "l",
     open: "Enter",
     newContact: "n",
+    newGroup: "g",
     deleteContact: "d",
     edit: "e",
+    mail: "m",
     sync: "s",
     importFile: "Ctrl+I",
     exportFile: "Ctrl+E",
@@ -38,10 +44,16 @@ function merge(over) {
   take("down")
   take("upAlt", "up_alt")
   take("downAlt", "down_alt")
+  take("left")
+  take("right")
+  take("leftAlt", "left_alt")
+  take("rightAlt", "right_alt")
   take("open")
   take("newContact", "new")
+  take("newGroup", "new_group")
   take("deleteContact", "delete")
   take("edit")
+  take("mail")
   take("sync")
   take("importFile", "import")
   take("exportFile", "export")
@@ -61,12 +73,17 @@ function rows(bindings) {
     ]},
     { group: "List", items: [
       { keys: b.search, action: "Focus search" },
-      { keys: b.up + " / " + b.upAlt, action: "Move up" },
-      { keys: b.down + " / " + b.downAlt, action: "Move down" },
-      { keys: b.open, action: "Open the selected contact" },
+      { keys: b.left + " / " + b.leftAlt, action: "Previous column" },
+      { keys: b.right + " / " + b.rightAlt, action: "Next column" },
+      { keys: "Tab", action: "Cycle columns" },
+      { keys: b.up + " / " + b.upAlt, action: "Move up in this column" },
+      { keys: b.down + " / " + b.downAlt, action: "Move down in this column" },
+      { keys: b.open, action: "Open or edit" },
       { keys: b.newContact, action: "New contact" },
+      { keys: b.newGroup, action: "New group" },
       { keys: b.edit, action: "Edit the selected contact" },
       { keys: b.deleteContact, action: "Delete the selected contact" },
+      { keys: b.mail, action: "Mail this card" },
       { keys: b.sync, action: "Sync with iCloud now" }
     ]},
     { group: "Files", items: [
@@ -110,6 +127,8 @@ function keyMatches(event, key) {
   if (k === "Enter" || k === "Return") return event.key === Qt.Key_Return || event.key === Qt.Key_Enter
   if (k === "Up") return event.key === Qt.Key_Up
   if (k === "Down") return event.key === Qt.Key_Down
+  if (k === "Left") return event.key === Qt.Key_Left
+  if (k === "Right") return event.key === Qt.Key_Right
   if (k === "Tab") return event.key === Qt.Key_Tab
   if (k === "/" ) return event.key === Qt.Key_Slash || (event.text === "/")
   if (k === "?") return event.text === "?" || (event.key === Qt.Key_Question)
