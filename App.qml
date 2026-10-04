@@ -57,12 +57,13 @@ Item {
   property string pane: "list"
   property int groupCursor: 0
   property bool myCardActive: false
+  property string pendingMyUid: ""
   readonly property string passwordMask: "••••••••••••••••"
 
   readonly property var allContacts: svc && svc.contacts ? svc.contacts : []
   readonly property var groupNames: collectGroupNames(allContacts)
   readonly property var groupItems: ["All"].concat(groupNames)
-  readonly property var contacts: filterContacts(allContacts, searchText, groupFilter)
+  property var contacts: []
   readonly property var current: svc ? svc.current : null
   readonly property var keys: Keymap.merge(svc && svc.keys ? svc.keys : {})
   readonly property string keyContext: Keymap.contextFor({
@@ -176,12 +177,13 @@ Item {
   }
 
   function selectUid(uid) {
-    var want = String(uid || "")
+    var want = root.uidKey(uid)
     if (!want) return false
     for (var i = 0; i < root.contacts.length; i++) {
-      if (String(root.contacts[i].uid || "") === want) {
-        root.cursor = i
-        root.selectCurrent()
+      if (root.uidKey(root.contacts[i].uid) === want) {
+        if (root.cursor !== i) root.cursor = i
+        if (!root.selected || root.uidKey(root.selected.uid) !== want)
+          root.selectCurrent()
         return true
       }
     }
@@ -189,19 +191,24 @@ Item {
   }
 
   function openMyCard() {
+    var alreadyAll = !String(root.groupFilter || "")
     root.myCardActive = true
-    root.pane = "groups"
-    root.groupFilter = ""
-    root.groupCursor = 0
-    var card = root.findMyCard(root.allContacts, root.appleId())
-    function show() {
-      if (!card) {
-        root.selected = null
-        return
-      }
-      if (!root.selectUid(card.uid)) root.selected = root.rowAsDetail(card)
+    if (!alreadyAll) {
+      root.groupFilter = ""
+      root.groupCursor = 0
     }
-    Qt.callLater(show)
+    var card = root.findMyCard(root.allContacts, root.appleId())
+    if (!card) {
+      root.pendingMyUid = ""
+      root.selected = null
+      return
+    }
+    if (alreadyAll && root.selectUid(card.uid)) {
+      root.pendingMyUid = ""
+      return
+    }
+    root.pendingMyUid = String(card.uid || "")
+    root.selected = root.rowAsDetail(card)
   }
 
   function applyGroupCursor() {
@@ -486,6 +493,22 @@ Item {
     return false
   }
 
+  function contactsUnchanged(a, b) {
+    if (a === b) return true
+    if (!a || !b || a.length !== b.length) return false
+    for (var i = 0; i < a.length; i++) {
+      if (String(a[i] && a[i].uid || "") !== String(b[i] && b[i].uid || ""))
+        return false
+    }
+    return true
+  }
+
+  function rebuildContacts() {
+    var next = filterContacts(allContacts, searchText, groupFilter)
+    if (contactsUnchanged(contacts, next)) return
+    contacts = next
+  }
+
   function filterContacts(list, q, group) {
     if (!list || !list.length) return []
     var needle = String(q || "").trim().toLowerCase()
@@ -745,13 +768,24 @@ Item {
     if (Keymap.matchChord(event, keys.exportFile)) { pickExport(false); event.accepted = true; return }
   }
 
+  onAllContactsChanged: rebuildContacts()
+  onSearchTextChanged: rebuildContacts()
+  onGroupFilterChanged: rebuildContacts()
+  Component.onCompleted: rebuildContacts()
+
   onContactsChanged: {
+    if (root.pendingMyUid) {
+      if (root.contacts.length && root.selectUid(root.pendingMyUid))
+        root.pendingMyUid = ""
+      return
+    }
+    if (root.myCardActive) return
     if (cursor >= contacts.length) cursor = Math.max(0, contacts.length - 1)
     if (!contacts.length) {
       selected = null
       return
     }
-    if (selected && String(selected.uid || "") === selectedUid()) return
+    if (selected && root.uidKey(selected.uid) === root.uidKey(selectedUid())) return
     selectCurrent()
   }
 
@@ -943,29 +977,20 @@ Item {
 
             Button {
               visible: !root.settingsOpen && !root.editing
-              text: "New"
+              text: "New contact"
               tooltipText: "New contact · n"
-              foreground: root.dim
+              bordered: true
+              foreground: root.foreground
               accent: root.accent
-              fontSize: Style.font.caption
               onClicked: root.startNew()
-            }
-            Button {
-              visible: !root.settingsOpen && !root.editing
-              text: "Group"
-              tooltipText: "New group · g"
-              foreground: root.dim
-              accent: root.accent
-              fontSize: Style.font.caption
-              onClicked: root.startNewGroup()
             }
             Button {
               visible: !root.settingsOpen && !root.editing
               text: "Edit"
               tooltipText: "Edit · e"
-              foreground: root.dim
+              bordered: true
+              foreground: root.foreground
               accent: root.accent
-              fontSize: Style.font.caption
               enabled: !!root.selected
               onClicked: root.startEdit()
             }
@@ -973,21 +998,56 @@ Item {
               visible: !root.settingsOpen && !root.editing
               text: "Delete"
               tooltipText: "Delete · d"
-              foreground: root.dim
+              bordered: true
+              foreground: root.foreground
               accent: root.accent
-              fontSize: Style.font.caption
               enabled: !!root.selected
               onClicked: root.confirmDelete = true
             }
+            Rectangle {
+              visible: !root.settingsOpen && !root.editing
+              anchors.verticalCenter: parent.verticalCenter
+              width: 1
+              height: Style.space(22)
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.16)
+            }
             Button {
               visible: !root.settingsOpen && !root.editing
-              text: "Mail"
-              tooltipText: "Mail this card · m"
-              foreground: root.dim
+              text: "Email card"
+              tooltipText: "Attach this card to a new email · m"
+              bordered: true
+              foreground: root.foreground
               accent: root.accent
-              fontSize: Style.font.caption
               enabled: !!root.selected
               onClicked: root.emailSelected()
+            }
+            Button {
+              visible: !root.settingsOpen && !root.editing
+              text: "Export all"
+              tooltipText: "Save every contact in one vCard file · Ctrl+E"
+              bordered: true
+              foreground: root.foreground
+              accent: root.accent
+              enabled: root.allContacts.length > 0
+              onClicked: root.pickExport(false)
+            }
+            Button {
+              visible: root.editing
+              text: "Save"
+              tooltipText: "Save · Ctrl+S"
+              bordered: true
+              foreground: root.foreground
+              accent: root.accent
+              onClicked: root.saveDraft()
+            }
+            Button {
+              visible: root.editing
+              text: "Cancel"
+              tooltipText: "Cancel · Esc"
+              bordered: true
+              foreground: root.foreground
+              accent: root.accent
+              onClicked: root.editing = false
             }
           }
         }
@@ -1023,6 +1083,7 @@ Item {
               background: root.background
               onActivated: function(index) { root.chooseGroup(index) }
               onMyCardRequested: root.openMyCard()
+              onAddRequested: root.startNewGroup()
               onNameAccepted: root.createGroup()
             }
 
@@ -1237,15 +1298,6 @@ Item {
             height: parent.height
             color: root.background
 
-            Rectangle {
-              visible: root.pane === "detail" && !root.settingsOpen && !root.editing
-              anchors.left: parent.left
-              width: 2
-              height: parent.height
-              color: root.accent
-              z: 2
-            }
-
             ContactDetail {
               anchors.fill: parent
               visible: !root.editing && !root.settingsOpen && !!root.selected
@@ -1349,18 +1401,18 @@ Item {
                 Button {
                   text: root.setupBusy ? "Working…" : "Save and sync"
                   enabled: !root.setupBusy
-                  foreground: root.dim
+                  bordered: true
+                  foreground: root.foreground
                   accent: root.accent
-                  fontSize: Style.font.caption
                   onClicked: root.saveIcloud()
                 }
                 Button {
                   text: "Sync now"
                   visible: !!(root.sync && (root.sync.has_password || root.sync.apple_id))
                   enabled: !root.setupBusy
-                  foreground: root.dim
+                  bordered: true
+                  foreground: root.foreground
                   accent: root.accent
-                  fontSize: Style.font.caption
                   onClicked: {
                     if (!root.svc) return
                     root.setupError = "Looking for your contacts on iCloud…"
@@ -1391,8 +1443,8 @@ Item {
                 }
                 Row {
                   spacing: Style.space(8)
-                  Button { text: "Delete"; foreground: root.dim; accent: root.accent; fontSize: Style.font.caption; onClicked: root.deleteSelected() }
-                  Button { text: "Cancel"; foreground: root.dim; accent: root.accent; fontSize: Style.font.caption; onClicked: root.confirmDelete = false }
+                  Button { text: "Delete"; bordered: true; foreground: root.foreground; accent: root.accent; onClicked: root.deleteSelected() }
+                  Button { text: "Cancel"; bordered: true; foreground: root.foreground; accent: root.accent; onClicked: root.confirmDelete = false }
                 }
               }
             }

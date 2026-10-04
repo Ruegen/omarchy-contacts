@@ -16,6 +16,7 @@ Rectangle {
   property color background: Color.background
   signal activated(int index)
   signal myCardRequested()
+  signal addRequested()
   signal nameAccepted()
 
   color: "transparent"
@@ -38,17 +39,9 @@ Rectangle {
 
   onCursorChanged: ensureVisible()
 
-  Rectangle {
-    visible: root.focused
-    anchors.left: parent.left
-    width: 2
-    height: parent.height
-    color: root.accent
-  }
-
   Column {
     anchors.fill: parent
-    anchors.leftMargin: root.focused ? Style.space(8) : Style.space(6)
+    anchors.leftMargin: Style.space(6)
     anchors.rightMargin: Style.space(6)
     anchors.topMargin: Style.space(8)
     anchors.bottomMargin: Style.space(8)
@@ -98,11 +91,13 @@ Rectangle {
     ListView {
       id: list
       width: parent.width
-      height: Math.max(Style.space(80), parent.height - Style.space(40) - (root.naming ? Style.space(40) : 0))
+      height: Math.max(Style.space(80), parent.height - Style.space(80) - (root.naming ? Style.space(40) : 0))
       model: root.groups
       clip: true
       boundsBehavior: Flickable.StopAtBounds
-      currentIndex: root.myCardActive ? -1 : root.cursor
+      highlightFollowsCurrentItem: false
+      keyNavigationEnabled: false
+      currentIndex: -1
       spacing: Style.space(2)
       ScrollBar.vertical: ScrollBar {
         policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
@@ -134,6 +129,18 @@ Rectangle {
           onClicked: root.activated(index)
         }
       }
+    }
+
+    Button {
+      visible: !root.naming
+      width: parent.width
+      text: "New group"
+      tooltipText: "New group · g"
+      bordered: true
+      leftAlign: true
+      foreground: root.textColor
+      accent: root.accent
+      onClicked: root.addRequested()
     }
   }
 }

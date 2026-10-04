@@ -113,11 +113,5 @@ Flickable {
     TextField { id: bdayField; width: firstField.width; text: String(root.val(root.draft, "bday", "")) }
     Text { text: "Notes"; textFormat: Text.PlainText; color: root.dimColor; font.family: Style.font.family; font.pixelSize: Style.font.body }
     TextField { id: noteField; width: firstField.width; text: String(root.val(root.draft, "note", "")) }
-
-    Row {
-      spacing: Style.space(8)
-      Button { text: "Save"; foreground: root.dimColor; fontSize: Style.font.caption; onClicked: root.saveRequested() }
-      Button { text: "Cancel"; foreground: root.dimColor; fontSize: Style.font.caption; onClicked: root.cancelRequested() }
-    }
   }
 }

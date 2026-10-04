@@ -19,29 +19,29 @@ Rectangle {
   clip: true
 
   function ensureVisible() {
-    if (cursor < 0 || !list.itemAtIndex) return
-    list.positionViewAtIndex(Math.max(0, cursor), ListView.Contain)
+    if (cursor < 0 || list.count <= 0) return
+    var item = list.itemAtIndex(cursor)
+    if (item) {
+      var top = item.y
+      var bottom = item.y + item.height
+      if (top >= list.contentY && bottom <= list.contentY + list.height)
+        return
+    }
+    list.positionViewAtIndex(Math.max(0, Math.min(cursor, list.count - 1)), ListView.Contain)
   }
 
   onCursorChanged: ensureVisible()
 
-  Rectangle {
-    visible: root.focused
-    anchors.left: parent.left
-    width: 2
-    height: parent.height
-    color: root.accent
-  }
-
   ListView {
     id: list
     anchors.fill: parent
-    anchors.leftMargin: root.focused ? Style.space(6) : 0
     anchors.rightMargin: Style.space(4)
     model: root.contacts
     clip: true
     boundsBehavior: Flickable.StopAtBounds
-    currentIndex: root.cursor
+    highlightFollowsCurrentItem: false
+    keyNavigationEnabled: false
+    currentIndex: -1
     spacing: Style.space(2)
     ScrollBar.vertical: ScrollBar {
       policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff

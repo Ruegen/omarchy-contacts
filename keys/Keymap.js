@@ -88,7 +88,7 @@ function rows(bindings) {
     ]},
     { group: "Files", items: [
       { keys: b.importFile, action: "Import a vCard file" },
-      { keys: b.exportFile, action: "Export a vCard file" }
+      { keys: b.exportFile, action: "Export all contacts as one vCard file" }
     ]},
     { group: "Editing", items: [
       { keys: "Tab / Shift+Tab", action: "Move between fields" },
